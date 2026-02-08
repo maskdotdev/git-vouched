@@ -1,10 +1,11 @@
 "use client"
 
 import Link from "next/link"
-import { useQuery } from "convex/react"
+import { usePaginatedQuery, useQuery } from "convex/react"
 import { ArrowLeft, ArrowRight, Fingerprint, ShieldCheck, ShieldOff } from "lucide-react"
 
 import { api } from "@/convex/api"
+import { Button } from "@/components/ui/button"
 import { getValidConvexUrl } from "@/lib/convex-url"
 
 type UserScreenProps = {
@@ -36,6 +37,18 @@ export function UserScreen({ handle }: UserScreenProps) {
 
 function UserScreenConfigured({ handle }: UserScreenProps) {
   const data = useQuery(api.vouch.getUserOverview, { handle })
+  const {
+    results: rows,
+    isLoading: rowsLoading,
+    loadMore,
+    status: rowStatus,
+  } = usePaginatedQuery(
+    api.vouch.listUserEntriesPaginated,
+    {
+      handle,
+    },
+    { initialNumItems: 50 }
+  )
 
   if (data === undefined) {
     return (
@@ -154,10 +167,10 @@ function UserScreenConfigured({ handle }: UserScreenProps) {
           Trust across repositories
         </h2>
         <div className="grid gap-4 md:grid-cols-2">
-          {data.rows.map((row, i) => (
+          {rows.map((row, i) => (
             <Link
               key={row.entry._id}
-              href={`/r/${row.repo.slug}`}
+              href={`/r/${row.repoSlug}`}
               className="animate-rise card-paper group rounded-xl p-5 transition-all hover:shadow-md"
               style={{ animationDelay: `${i * 50}ms` }}
             >
@@ -169,7 +182,7 @@ function UserScreenConfigured({ handle }: UserScreenProps) {
                     <ShieldOff className="size-4 text-destructive shrink-0" />
                   )}
                   <span className="font-mono text-sm font-medium text-foreground">
-                    {row.repo.slug}
+                    {row.repoSlug}
                   </span>
                 </div>
                 <ArrowRight className="size-3.5 text-muted-foreground opacity-0 transition-all group-hover:opacity-100 group-hover:translate-x-0.5 shrink-0 mt-0.5" />
@@ -191,11 +204,28 @@ function UserScreenConfigured({ handle }: UserScreenProps) {
             </Link>
           ))}
         </div>
-        {data.rows.length === 0 && (
+        {rows.length === 0 && rowsLoading && (
+          <div className="card-paper rounded-xl border-dashed p-8 text-center">
+            <p className="text-sm text-muted-foreground">Loading trust entries&hellip;</p>
+          </div>
+        )}
+        {rows.length === 0 && !rowsLoading && (
           <div className="card-paper rounded-xl border-dashed p-8 text-center">
             <p className="text-sm text-muted-foreground">No trust entries found for this handle.</p>
           </div>
         )}
+        {rowStatus === "CanLoadMore" || rowStatus === "LoadingMore" ? (
+          <div className="mt-4 flex justify-center">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => loadMore(50)}
+              disabled={rowStatus === "LoadingMore"}
+            >
+              {rowStatus === "LoadingMore" ? "Loading more…" : "Load 50 more"}
+            </Button>
+          </div>
+        ) : null}
       </section>
     </main>
   )

@@ -12,6 +12,9 @@ export type RepositoryDoc = {
   status: RepoStatus
   lastIndexedAt: number
   lastError?: string
+  entryCount?: number
+  vouchedCount?: number
+  denouncedCount?: number
 }
 
 export type SnapshotDoc = {
@@ -25,6 +28,7 @@ export type SnapshotDoc = {
 export type EntryDoc = {
   _id: string
   repoId: string
+  repoSlug?: string
   snapshotId: string
   platform: string
   username: string
@@ -79,6 +83,7 @@ export type IndexRepoResult =
       auditRecorded: boolean
       auditBlockHash?: string
       auditHeight?: number
+      skippedNoChanges?: boolean
     }
   | {
       status: "missing_file" | "missing_repo" | "error"
@@ -109,7 +114,6 @@ export type ReindexTrackedReposResult = {
 export type RepositoryOverview = {
   repo: RepositoryDoc
   snapshot: SnapshotDoc | null
-  entries: EntryDoc[]
   counts: {
     vouched: number
     denounced: number
@@ -121,6 +125,7 @@ export type RepositoryAuditOverview = {
   rows: Array<{
     block: AuditBlockDoc
     changes: AuditChangeDoc[]
+    hasMoreChanges: boolean
   }>
 } | null
 
@@ -131,11 +136,12 @@ export type UserOverview = {
     denounced: number
     repositories: number
   }
-  rows: Array<{
-    entry: EntryDoc
-    repo: RepositoryDoc
-  }>
 } | null
+
+export type UserEntryRow = {
+  entry: EntryDoc
+  repoSlug: string
+}
 
 export type HandleSearchRow = {
   platform: string
@@ -160,13 +166,25 @@ type ApiShape = {
   vouch: {
     listRecentRepos: FunctionReference<"query", "public", { limit?: number }, RepositoryDoc[]>
     getRepository: FunctionReference<"query", "public", { slug: string }, RepositoryOverview>
+    listRepositoryEntriesPaginated: FunctionReference<
+      "query",
+      "public",
+      { slug: string; paginationOpts: PaginationOptions },
+      PaginationResult<EntryDoc>
+    >
     listRepositoryAudit: FunctionReference<
       "query",
       "public",
-      { slug: string; limit?: number },
+      { slug: string; limit?: number; changeLimit?: number },
       RepositoryAuditOverview
     >
     getUserOverview: FunctionReference<"query", "public", { handle: string }, UserOverview>
+    listUserEntriesPaginated: FunctionReference<
+      "query",
+      "public",
+      { handle: string; paginationOpts: PaginationOptions },
+      PaginationResult<UserEntryRow>
+    >
     searchHandles: FunctionReference<
       "query",
       "public",
@@ -197,6 +215,16 @@ type InternalApiShape = {
         lastError?: string
       },
       string
+    >
+    getRepositorySnapshotMeta: FunctionReference<
+      "query",
+      "internal",
+      { slug: string },
+      {
+        repoStatus: RepoStatus
+        commitSha: string | null
+        filePath: string | null
+      } | null
     >
     replaceRepositorySnapshot: FunctionReference<
       "mutation",

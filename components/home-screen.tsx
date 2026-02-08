@@ -11,7 +11,7 @@ import {
   Search,
   Trophy,
 } from "lucide-react"
-import { type FormEvent, useState, useTransition } from "react"
+import { type FormEvent, useEffect, useState, useTransition } from "react"
 
 import { type IndexRepoResult, type RepositoryDoc, api } from "@/convex/api"
 import { LeaderboardTable } from "@/components/leaderboard-table"
@@ -48,16 +48,26 @@ export function HomeScreen() {
 function HomeScreenConfigured() {
   const router = useRouter()
   const [search, setSearch] = useState("")
+  const [debouncedSearch, setDebouncedSearch] = useState("")
   const [repoInput, setRepoInput] = useState("")
   const [indexResult, setIndexResult] = useState<IndexRepoResult | null>(null)
   const [isPending, startTransition] = useTransition()
   const normalizedSearch = normalizeHandle(search)
 
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      setDebouncedSearch(normalizedSearch)
+    }, 250)
+
+    return () => clearTimeout(timeoutId)
+  }, [normalizedSearch])
+
   const recentRepos = (useQuery(api.vouch.listRecentRepos, { limit: 12 }) ?? []) as RepositoryDoc[]
+  const canSearch = debouncedSearch.length >= 2
   const searchMatches =
     useQuery(
       api.vouch.searchHandles,
-      normalizedSearch ? { query: normalizedSearch, limit: 8 } : "skip"
+      canSearch ? { query: debouncedSearch, limit: 8 } : "skip"
     ) ?? []
   const leaderboard = useQuery(api.vouch.listTopHandles, { limit: 20 }) ?? []
 
@@ -159,16 +169,26 @@ function HomeScreenConfigured() {
               <p className="text-sm leading-relaxed text-muted-foreground">
                 {indexResult.status === "indexed" ? (
                   <>
-                    Indexed{" "}
-                    <strong className="text-foreground">{indexResult.slug}</strong>{" "}
-                    from{" "}
-                    <code className="rounded border border-border bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
-                      {indexResult.filePath}
-                    </code>{" "}
-                    ({indexResult.entriesIndexed} entries, {indexResult.changesDetected} change
-                    {indexResult.changesDetected === 1 ? "" : "s"}
-                    {indexResult.auditRecorded ? `, block #${indexResult.auditHeight ?? "?"}` : ", no new block"}
-                    ).{" "}
+                    {indexResult.skippedNoChanges ? (
+                      <>
+                        No changes for{" "}
+                        <strong className="text-foreground">{indexResult.slug}</strong>. Existing index
+                        is still current.
+                      </>
+                    ) : (
+                      <>
+                        Indexed{" "}
+                        <strong className="text-foreground">{indexResult.slug}</strong>{" "}
+                        from{" "}
+                        <code className="rounded border border-border bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
+                          {indexResult.filePath}
+                        </code>{" "}
+                        ({indexResult.entriesIndexed} entries, {indexResult.changesDetected} change
+                        {indexResult.changesDetected === 1 ? "" : "s"}
+                        {indexResult.auditRecorded ? `, block #${indexResult.auditHeight ?? "?"}` : ", no new block"}
+                        ).
+                      </>
+                    )}{" "}
                     <Link
                       className="font-medium text-accent underline decoration-accent/40 underline-offset-2 transition hover:decoration-accent"
                       href={`/r/${indexResult.slug}`}
@@ -189,7 +209,7 @@ function HomeScreenConfigured() {
       </section>
 
       {/* ─── Search Preview ─────────────────────────────── */}
-      {normalizedSearch ? (
+      {canSearch ? (
         <section className="panel-elevated rounded-2xl p-6 md:p-8">
           <h2 className="mb-5 flex items-center gap-2 font-[var(--font-display)] text-xl font-semibold text-foreground">
             <Search className="size-4 text-ring" />

@@ -17,6 +17,9 @@ export default defineSchema({
     ),
     lastIndexedAt: v.number(),
     lastError: v.optional(v.string()),
+    entryCount: v.optional(v.number()),
+    vouchedCount: v.optional(v.number()),
+    denouncedCount: v.optional(v.number()),
   })
     .index("by_slug", ["slug"])
     .index("by_last_indexed", ["lastIndexedAt"]),
@@ -30,6 +33,7 @@ export default defineSchema({
 
   entries: defineTable({
     repoId: v.id("repositories"),
+    repoSlug: v.optional(v.string()),
     snapshotId: v.id("snapshots"),
     platform: v.string(),
     username: v.string(),
@@ -40,6 +44,8 @@ export default defineSchema({
     .index("by_repo", ["repoId"])
     .index("by_snapshot", ["snapshotId"])
     .index("by_username", ["username"])
+    .index("by_username_and_platform", ["username", "platform"])
+    .index("by_handle", ["handle"])
     .index("by_repo_and_type", ["repoId", "type"])
     .searchIndex("search_username", {
       searchField: "username",
@@ -57,6 +63,7 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_handle", ["handle"])
+    .index("by_username", ["username"])
     .index("by_score", ["score", "handle"]),
 
   auditBlocks: defineTable({

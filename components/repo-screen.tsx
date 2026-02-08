@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { useQuery } from "convex/react"
+import { usePaginatedQuery, useQuery } from "convex/react"
 import {
   ArrowLeft,
   ArrowRight,
@@ -71,7 +71,19 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
   const [message, setMessage] = useState<string | null>(null)
 
   const data = useQuery(api.vouch.getRepository, { slug }) as RepositoryOverview | undefined
-  const audit = useQuery(api.vouch.listRepositoryAudit, { slug, limit: 12 }) as
+  const {
+    results: entries,
+    isLoading: entriesLoading,
+    loadMore: loadMoreEntries,
+    status: entryStatus,
+  } = usePaginatedQuery(
+    api.vouch.listRepositoryEntriesPaginated,
+    {
+      slug,
+    },
+    { initialNumItems: 50 }
+  )
+  const audit = useQuery(api.vouch.listRepositoryAudit, { slug, limit: 12, changeLimit: 20 }) as
     | RepositoryAuditOverview
     | undefined
 
@@ -82,7 +94,9 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
         const result = await requestRepoIndex(slug)
         setMessage(
           result.status === "indexed"
-            ? `Indexed ${result.entriesIndexed} entries from ${result.filePath}. ${result.changesDetected} change${result.changesDetected === 1 ? "" : "s"} detected${result.auditRecorded ? `, chain block #${result.auditHeight ?? "?"} recorded.` : ", no new block recorded."}`
+            ? result.skippedNoChanges
+              ? "No changes detected. Existing index is already up to date."
+              : `Indexed ${result.entriesIndexed} entries from ${result.filePath}. ${result.changesDetected} change${result.changesDetected === 1 ? "" : "s"} detected${result.auditRecorded ? `, chain block #${result.auditHeight ?? "?"} recorded.` : ", no new block recorded."}`
             : result.message ?? "Re-index failed."
         )
       } catch (error) {
@@ -190,7 +204,7 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
           Trust entries
         </h2>
         <div className="grid gap-4 md:grid-cols-2">
-          {data.entries.map((entry, i) => (
+          {entries.map((entry, i) => (
             <Link
               key={entry._id}
               href={`/u/${encodeURIComponent(entry.handle)}`}
@@ -227,11 +241,28 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
             </Link>
           ))}
         </div>
-        {data.entries.length === 0 && (
+        {entries.length === 0 && entriesLoading && (
+          <div className="card-paper rounded-xl border-dashed p-8 text-center">
+            <p className="text-sm text-muted-foreground">Loading trust entries&hellip;</p>
+          </div>
+        )}
+        {entries.length === 0 && !entriesLoading && (
           <div className="card-paper rounded-xl border-dashed p-8 text-center">
             <p className="text-sm text-muted-foreground">No trust entries found in this repository.</p>
           </div>
         )}
+        {entryStatus === "CanLoadMore" || entryStatus === "LoadingMore" ? (
+          <div className="mt-4 flex justify-center">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => loadMoreEntries(50)}
+              disabled={entryStatus === "LoadingMore"}
+            >
+              {entryStatus === "LoadingMore" ? "Loading more…" : "Load 50 more entries"}
+            </Button>
+          </div>
+        ) : null}
       </section>
 
       <section>
@@ -372,7 +403,7 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
                     {/* Diff detail */}
                     {row.changes.length > 0 ? (
                       <ul className="mt-4 space-y-1 border-l-2 border-border pl-3 text-sm">
-                        {row.changes.slice(0, 8).map((change) => (
+                        {row.changes.map((change) => (
                           <li
                             key={change._id}
                             className="font-mono text-muted-foreground"
@@ -401,9 +432,9 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
                             ) : null}
                           </li>
                         ))}
-                        {row.changes.length > 8 ? (
+                        {row.hasMoreChanges ? (
                           <li className="text-xs text-muted-foreground/50">
-                            … {row.changes.length - 8} more
+                            … {Math.max(0, row.block.changeCount - row.changes.length)} more
                           </li>
                         ) : null}
                       </ul>

@@ -87,6 +87,33 @@ function normalizeGithubSlug(input: string): { owner: string; name: string; slug
   return { owner, name, slug: `${owner}/${name}` }
 }
 
+function parseUserHandle(input: string): { username: string; platformFilter: string | null } | null {
+  const normalized = input.trim().toLowerCase().replace(/^@/, "")
+  if (!normalized) {
+    return null
+  }
+
+  const split = normalized.split(":", 2)
+  const platformFilter = split.length === 2 ? split[0] : null
+  const username = split.length === 2 ? split[1] : split[0]
+
+  if (!username) {
+    return null
+  }
+
+  return { username, platformFilter }
+}
+
+function emptyPaginationResult<T>() {
+  return {
+    page: [] as T[],
+    isDone: true,
+    continueCursor: "",
+    splitCursor: null,
+    pageStatus: null,
+  }
+}
+
 function parseTrustdown(input: string): ParsedEntry[] {
   const records = new Map<string, ParsedEntry>()
 
@@ -418,6 +445,33 @@ export const setRepositoryStatus = internalMutationGeneric({
   },
 })
 
+export const getRepositorySnapshotMeta = internalQueryGeneric({
+  args: {
+    slug: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const repo = await ctx.db
+      .query("repositories")
+      .withIndex("by_slug", (q) => q.eq("slug", args.slug))
+      .unique()
+
+    if (!repo) {
+      return null
+    }
+
+    const snapshot = await ctx.db
+      .query("snapshots")
+      .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
+      .first()
+
+    return {
+      repoStatus: repo.status,
+      commitSha: snapshot?.commitSha ?? null,
+      filePath: snapshot?.filePath ?? null,
+    }
+  },
+})
+
 export const replaceRepositorySnapshot = internalMutationGeneric({
   args: {
     slug: v.string(),
@@ -441,6 +495,10 @@ export const replaceRepositorySnapshot = internalMutationGeneric({
   },
   handler: async (ctx, args) => {
     const now = Date.now()
+    const normalizedEntries = args.entries.map((entry) => normalizeEntry(entry))
+    const vouchedCount = normalizedEntries.filter((entry) => entry.type === "vouch").length
+    const denouncedCount = normalizedEntries.length - vouchedCount
+
     let repo = await ctx.db
       .query("repositories")
       .withIndex("by_slug", (q) => q.eq("slug", args.slug))
@@ -455,6 +513,9 @@ export const replaceRepositorySnapshot = internalMutationGeneric({
       status: "indexed" as const,
       lastIndexedAt: now,
       lastError: undefined,
+      entryCount: normalizedEntries.length,
+      vouchedCount,
+      denouncedCount,
     }
 
     if (!repo) {
@@ -468,8 +529,6 @@ export const replaceRepositorySnapshot = internalMutationGeneric({
     if (!repo) {
       throw new ConvexError("Failed to initialize repository record")
     }
-
-    const normalizedEntries = args.entries.map((entry) => normalizeEntry(entry))
 
     const existingEntries = await ctx.db
       .query("entries")
@@ -508,6 +567,7 @@ export const replaceRepositorySnapshot = internalMutationGeneric({
     for (const entry of normalizedEntries) {
       await ctx.db.insert("entries", {
         repoId: repo._id,
+        repoSlug: repo.slug,
         snapshotId,
         platform: entry.platform,
         username: entry.username,
@@ -811,6 +871,36 @@ export const indexGithubRepo = internalActionGeneric({
       }
     }
 
+    const existingSnapshotMeta = await ctx.runQuery(internalApi.vouch.getRepositorySnapshotMeta, {
+      slug: normalized.slug,
+    })
+    const isSnapshotUnchanged =
+      commitSha.length > 0 &&
+      existingSnapshotMeta?.repoStatus === "indexed" &&
+      existingSnapshotMeta.commitSha === commitSha &&
+      existingSnapshotMeta.filePath === selectedPath
+
+    if (isSnapshotUnchanged) {
+      await ctx.runMutation(internalApi.vouch.setRepositoryStatus, {
+        slug: normalized.slug,
+        owner: normalized.owner,
+        name: normalized.name,
+        defaultBranch,
+        status: "indexed",
+        lastError: undefined,
+      })
+
+      return {
+        status: "indexed",
+        slug: normalized.slug,
+        filePath: selectedPath,
+        entriesIndexed: 0,
+        changesDetected: 0,
+        auditRecorded: false,
+        skippedNoChanges: true,
+      } as const
+    }
+
     const entries = parseTrustdown(fileContent)
     const result = await ctx.runMutation(internalApi.vouch.replaceRepositorySnapshot, {
       slug: normalized.slug,
@@ -835,6 +925,7 @@ export const indexGithubRepo = internalActionGeneric({
       auditRecorded: result.auditRecorded,
       auditBlockHash: result.auditBlockHash,
       auditHeight: result.auditHeight,
+      skippedNoChanges: false,
     } as const
   },
 })
@@ -952,31 +1043,57 @@ export const getRepository = queryGeneric({
       return null
     }
 
-    const entries = await ctx.db
-      .query("entries")
-      .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
-      .collect()
     const snapshot = await ctx.db
       .query("snapshots")
       .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
       .first()
 
-    entries.sort((a, b) => {
-      if (a.type !== b.type) {
-        return a.type.localeCompare(b.type)
-      }
-      return a.handle.localeCompare(b.handle)
-    })
+    let vouched = repo.vouchedCount
+    let denounced = repo.denouncedCount
+
+    // Backfill counts for older repository docs that predate materialized counters.
+    if (typeof vouched !== "number" || typeof denounced !== "number") {
+      const entries = await ctx.db
+        .query("entries")
+        .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
+        .collect()
+      vouched = entries.filter((entry) => entry.type === "vouch").length
+      denounced = entries.length - vouched
+    }
 
     return {
       repo,
       snapshot,
-      entries,
       counts: {
-        vouched: entries.filter((entry) => entry.type === "vouch").length,
-        denounced: entries.filter((entry) => entry.type === "denounce").length,
+        vouched: vouched ?? 0,
+        denounced: denounced ?? 0,
       },
     }
+  },
+})
+
+export const listRepositoryEntriesPaginated = queryGeneric({
+  args: {
+    slug: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const normalized = normalizeGithubSlug(args.slug)
+    const repo = await ctx.db
+      .query("repositories")
+      .withIndex("by_slug", (q) => q.eq("slug", normalized.slug))
+      .unique()
+
+    if (!repo) {
+      return emptyPaginationResult()
+    }
+
+    const result = await ctx.db
+      .query("entries")
+      .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
+      .paginate(args.paginationOpts)
+
+    return result
   },
 })
 
@@ -984,10 +1101,12 @@ export const listRepositoryAudit = queryGeneric({
   args: {
     slug: v.string(),
     limit: v.optional(v.number()),
+    changeLimit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const normalized = normalizeGithubSlug(args.slug)
     const limit = Math.min(Math.max(args.limit ?? 12, 1), 50)
+    const changeLimit = Math.min(Math.max(args.changeLimit ?? 20, 1), 50)
     const repo = await ctx.db
       .query("repositories")
       .withIndex("by_slug", (q) => q.eq("slug", normalized.slug))
@@ -1008,7 +1127,7 @@ export const listRepositoryAudit = queryGeneric({
         const changes = await ctx.db
           .query("auditChanges")
           .withIndex("by_block", (q) => q.eq("blockId", block._id))
-          .collect()
+          .take(changeLimit)
 
         changes.sort((a, b) => {
           if (a.action !== b.action) {
@@ -1020,6 +1139,7 @@ export const listRepositoryAudit = queryGeneric({
         return {
           block,
           changes,
+          hasMoreChanges: block.changeCount > changes.length,
         }
       })
     )
@@ -1036,67 +1156,114 @@ export const getUserOverview = queryGeneric({
     handle: v.string(),
   },
   handler: async (ctx, args) => {
-    const input = args.handle.trim().toLowerCase().replace(/^@/, "")
-    if (!input) {
+    const parsed = parseUserHandle(args.handle)
+    if (!parsed) {
       return null
     }
 
-    const split = input.split(":", 2)
-    const platformFilter = split.length === 2 ? split[0] : null
-    const username = split.length === 2 ? split[1] : split[0]
+    const { username, platformFilter } = parsed
+    if (platformFilter) {
+      const row = await ctx.db
+        .query("leaderboardRows")
+        .withIndex("by_handle", (q) => q.eq("handle", `${platformFilter}:${username}`))
+        .unique()
+      if (!row) {
+        return null
+      }
 
-    if (!username) {
-      return null
-    }
-
-    const entries = await ctx.db
-      .query("entries")
-      .withIndex("by_username", (q) => q.eq("username", username))
-      .collect()
-
-    const filteredEntries = entries.filter((entry) =>
-      platformFilter ? entry.platform === platformFilter : true
-    )
-
-    if (filteredEntries.length === 0) {
-      return null
-    }
-
-    const repoMap = new Map<string, Awaited<ReturnType<typeof ctx.db.get>>>()
-    for (const entry of filteredEntries) {
-      const repoId = String(entry.repoId)
-      if (!repoMap.has(repoId)) {
-        const repo = await ctx.db.get(entry.repoId)
-        repoMap.set(repoId, repo)
+      return {
+        handle: row.handle,
+        counts: {
+          vouched: row.vouchedCount,
+          denounced: row.denouncedCount,
+          repositories: row.repositories,
+        },
       }
     }
 
-    const rows = filteredEntries
+    const rows = await ctx.db
+      .query("leaderboardRows")
+      .withIndex("by_username", (q) => q.eq("username", username))
+      .collect()
+
+    if (rows.length === 0) {
+      return null
+    }
+
+    let vouched = 0
+    let denounced = 0
+    let repositories = 0
+    for (const row of rows) {
+      vouched += row.vouchedCount
+      denounced += row.denouncedCount
+      repositories += row.repositories
+    }
+
+    return {
+      handle: username,
+      counts: {
+        vouched,
+        denounced,
+        repositories,
+      },
+    }
+  },
+})
+
+export const listUserEntriesPaginated = queryGeneric({
+  args: {
+    handle: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const parsed = parseUserHandle(args.handle)
+    if (!parsed) {
+      return emptyPaginationResult()
+    }
+
+    const { username, platformFilter } = parsed
+    const result = platformFilter
+      ? await ctx.db
+          .query("entries")
+          .withIndex("by_handle", (q) => q.eq("handle", `${platformFilter}:${username}`))
+          .paginate(args.paginationOpts)
+      : await ctx.db
+          .query("entries")
+          .withIndex("by_username", (q) => q.eq("username", username))
+          .paginate(args.paginationOpts)
+
+    const repoSlugById = new Map<string, string>()
+    for (const entry of result.page) {
+      const repoId = String(entry.repoId)
+      if (entry.repoSlug) {
+        repoSlugById.set(repoId, entry.repoSlug)
+        continue
+      }
+
+      if (!repoSlugById.has(repoId)) {
+        const repo = await ctx.db.get(entry.repoId)
+        if (repo) {
+          repoSlugById.set(repoId, repo.slug)
+        }
+      }
+    }
+
+    const rows = result.page
       .map((entry) => {
-        const repo = repoMap.get(String(entry.repoId))
-        if (!repo) return null
+        const repoSlug = repoSlugById.get(String(entry.repoId))
+        if (!repoSlug) {
+          return null
+        }
         return {
           entry,
-          repo,
+          repoSlug,
         }
       })
       .filter((row): row is NonNullable<typeof row> => row !== null)
 
-    rows.sort((a, b) => {
-      if (a.entry.type !== b.entry.type) {
-        return a.entry.type.localeCompare(b.entry.type)
-      }
-      return a.repo.slug.localeCompare(b.repo.slug)
-    })
-
     return {
-      handle: platformFilter ? `${platformFilter}:${username}` : username,
-      counts: {
-        vouched: rows.filter((row) => row.entry.type === "vouch").length,
-        denounced: rows.filter((row) => row.entry.type === "denounce").length,
-        repositories: new Set(rows.map((row) => row.repo.slug)).size,
-      },
-      rows,
+      ...result,
+      page: rows,
     }
   },
 })
@@ -1113,16 +1280,23 @@ export const searchHandles = queryGeneric({
       return []
     }
 
-    const core = raw.includes(":") ? raw.split(":", 2)[1] ?? raw : raw
+    const split = raw.split(":", 2)
+    const platformFilter = split.length === 2 ? split[0] : null
+    const core = split.length === 2 ? split[1] ?? raw : raw
     const username = core.trim()
     if (!username) {
       return []
     }
 
+    const readLimit = Math.min(Math.max(limit * 10, 30), 120)
     const hits = await ctx.db
       .query("entries")
-      .withSearchIndex("search_username", (q) => q.search("username", username))
-      .take(250)
+      .withSearchIndex("search_username", (q) =>
+        platformFilter
+          ? q.search("username", username).eq("platform", platformFilter)
+          : q.search("username", username)
+      )
+      .take(readLimit)
 
     const grouped = new Map<
       string,
