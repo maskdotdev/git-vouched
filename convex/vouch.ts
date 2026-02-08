@@ -88,7 +88,14 @@ function normalizeGithubSlug(input: string): { owner: string; name: string; slug
 }
 
 function parseUserHandle(input: string): { username: string; platformFilter: string | null } | null {
-  const normalized = input.trim().toLowerCase().replace(/^@/, "")
+  let normalized = input.trim()
+  try {
+    normalized = decodeURIComponent(normalized)
+  } catch {
+    // Ignore malformed percent-encoding and parse the raw input.
+  }
+
+  normalized = normalized.toLowerCase().replace(/^@/, "")
   if (!normalized) {
     return null
   }
