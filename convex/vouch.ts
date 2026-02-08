@@ -13,6 +13,12 @@ type ParsedEntry = {
 const GITHUB_ACCEPT = "application/vnd.github+json"
 const GITHUB_API_VERSION = "2022-11-28"
 
+function decodeBase64Utf8(base64Content: string): string {
+  const binary = atob(base64Content.replaceAll("\n", ""))
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+  return new TextDecoder().decode(bytes)
+}
+
 function normalizeGithubSlug(input: string): { owner: string; name: string; slug: string } {
   let value = input.trim()
   value = value.replace(/^https?:\/\/github\.com\//i, "")
@@ -333,7 +339,7 @@ export const indexGithubRepo = actionGeneric({
 
       selectedPath = path
       commitSha = payload.sha ?? repoData.pushed_at ?? ""
-      fileContent = Buffer.from(content.replaceAll("\n", ""), "base64").toString("utf8")
+      fileContent = decodeBase64Utf8(content)
       break
     }
 
@@ -371,6 +377,85 @@ export const indexGithubRepo = actionGeneric({
       filePath: selectedPath,
       entriesIndexed: result.entriesIndexed,
     } as const
+  },
+})
+
+export const listTrackedRepoSlugs = queryGeneric({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = Math.min(Math.max(args.limit ?? 25, 1), 100)
+    const repos = await ctx.db
+      .query("repositories")
+      .withIndex("by_last_indexed")
+      .order("asc")
+      .take(limit)
+
+    return repos
+      .filter((repo) => repo.status !== "missing_repo")
+      .map((repo) => repo.slug)
+  },
+})
+
+export const reindexTrackedRepos = actionGeneric({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const slugs = await ctx.runQuery(api.vouch.listTrackedRepoSlugs, {
+      limit: args.limit ?? 25,
+    })
+
+    let indexed = 0
+    let failed = 0
+    let missingFile = 0
+    let missingRepo = 0
+    const results: Array<
+      {
+        slug: string
+      } & (
+        | { status: "indexed"; entriesIndexed: number }
+        | { status: "missing_file" | "missing_repo" | "error"; message: string }
+      )
+    > = []
+
+    for (const slug of slugs) {
+      const result = await ctx.runAction(api.vouch.indexGithubRepo, { repo: slug })
+
+      if (result.status === "indexed") {
+        indexed += 1
+        results.push({
+          slug,
+          status: "indexed",
+          entriesIndexed: result.entriesIndexed,
+        })
+        continue
+      }
+
+      if (result.status === "missing_file") {
+        missingFile += 1
+      } else if (result.status === "missing_repo") {
+        missingRepo += 1
+      } else {
+        failed += 1
+      }
+
+      results.push({
+        slug,
+        status: result.status,
+        message: result.message,
+      })
+    }
+
+    return {
+      attempted: slugs.length,
+      indexed,
+      missingFile,
+      missingRepo,
+      failed,
+      results,
+    }
   },
 })
 
@@ -572,5 +657,65 @@ export const searchHandles = queryGeneric({
       ...row,
       repositories: row.repoIds.size,
     }))
+  },
+})
+
+export const listTopHandles = queryGeneric({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = Math.min(Math.max(args.limit ?? 12, 1), 100)
+    const entries = await ctx.db.query("entries").collect()
+
+    const grouped = new Map<
+      string,
+      {
+        platform: string
+        username: string
+        handle: string
+        vouchedCount: number
+        denouncedCount: number
+        repoIds: Set<string>
+      }
+    >()
+
+    for (const entry of entries) {
+      const existing = grouped.get(entry.handle) ?? {
+        platform: entry.platform,
+        username: entry.username,
+        handle: entry.handle,
+        vouchedCount: 0,
+        denouncedCount: 0,
+        repoIds: new Set<string>(),
+      }
+
+      if (entry.type === "vouch") {
+        existing.vouchedCount += 1
+      } else {
+        existing.denouncedCount += 1
+      }
+      existing.repoIds.add(String(entry.repoId))
+      grouped.set(entry.handle, existing)
+    }
+
+    return Array.from(grouped.values())
+      .map((row) => ({
+        platform: row.platform,
+        username: row.username,
+        handle: row.handle,
+        vouchedCount: row.vouchedCount,
+        denouncedCount: row.denouncedCount,
+        repositories: row.repoIds.size,
+        score: row.vouchedCount - row.denouncedCount,
+      }))
+      .sort((a, b) => {
+        if (a.score !== b.score) return b.score - a.score
+        if (a.vouchedCount !== b.vouchedCount) return b.vouchedCount - a.vouchedCount
+        if (a.denouncedCount !== b.denouncedCount) return a.denouncedCount - b.denouncedCount
+        if (a.repositories !== b.repositories) return b.repositories - a.repositories
+        return a.handle.localeCompare(b.handle)
+      })
+      .slice(0, limit)
   },
 })

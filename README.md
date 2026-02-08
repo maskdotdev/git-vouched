@@ -5,6 +5,7 @@ Read-only discovery UI for Vouch trust files (`VOUCHED.td`).
 This MVP lets you:
 
 - index public GitHub repos that contain `VOUCHED.td` or `.github/VOUCHED.td`
+- automatically reindex tracked repositories in the background (hourly batch)
 - search handles and see where they are vouched/denounced
 - inspect repository trust lists and user-level trust history
 

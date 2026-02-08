@@ -46,6 +46,26 @@ export type IndexRepoResult =
       message: string
     }
 
+export type ReindexTrackedReposResult = {
+  attempted: number
+  indexed: number
+  missingFile: number
+  missingRepo: number
+  failed: number
+  results: Array<
+    | {
+        slug: string
+        status: "indexed"
+        entriesIndexed: number
+      }
+    | {
+        slug: string
+        status: "missing_file" | "missing_repo" | "error"
+        message: string
+      }
+  >
+}
+
 export type RepositoryOverview = {
   repo: RepositoryDoc
   snapshot: SnapshotDoc | null
@@ -78,9 +98,26 @@ export type HandleSearchRow = {
   repositories: number
 }
 
+export type LeaderboardRow = {
+  platform: string
+  username: string
+  handle: string
+  vouchedCount: number
+  denouncedCount: number
+  repositories: number
+  score: number
+}
+
 type ApiShape = {
   vouch: {
     indexGithubRepo: FunctionReference<"action", "public", { repo: string }, IndexRepoResult>
+    reindexTrackedRepos: FunctionReference<
+      "action",
+      "public",
+      { limit?: number },
+      ReindexTrackedReposResult
+    >
+    listTrackedRepoSlugs: FunctionReference<"query", "public", { limit?: number }, string[]>
     listRecentRepos: FunctionReference<"query", "public", { limit?: number }, RepositoryDoc[]>
     getRepository: FunctionReference<"query", "public", { slug: string }, RepositoryOverview>
     getUserOverview: FunctionReference<"query", "public", { handle: string }, UserOverview>
@@ -90,6 +127,7 @@ type ApiShape = {
       { query: string; limit?: number },
       HandleSearchRow[]
     >
+    listTopHandles: FunctionReference<"query", "public", { limit?: number }, LeaderboardRow[]>
     setRepositoryStatus: FunctionReference<"mutation", "public", Record<string, unknown>, string>
     replaceRepositorySnapshot: FunctionReference<
       "mutation",
