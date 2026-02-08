@@ -119,84 +119,9 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
   const [message, setMessage] = useState<string | null>(null)
 
   const data = useQuery(api.vouch.getRepository, { slug }) as RepositoryOverview | undefined
-  const _audit = useQuery(api.vouch.listRepositoryAudit, { slug, limit: 12 }) as
+  const audit = useQuery(api.vouch.listRepositoryAudit, { slug, limit: 12 }) as
     | RepositoryAuditOverview
     | undefined
-
-  // ── DEBUG: inject a dummy Block #2 to preview the multi-block UI ──
-  const audit: RepositoryAuditOverview | undefined = _audit
-    ? {
-        ..._audit,
-        rows: [
-          {
-            block: {
-              _id: "__dummy_block_2__",
-              repoId: _audit.rows[0]?.block.repoId ?? "",
-              snapshotId: _audit.rows[0]?.block.snapshotId ?? "",
-              height: (_audit.rows[0]?.block.height ?? 0) + 1,
-              indexedAt: Date.now(),
-              source: "github" as const,
-              filePath: ".github/VOUCHED.td",
-              commitSha: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-              commitUrl: "https://github.com/example/repo/commit/a1b2c3d",
-              commitActor: "maskd",
-              previousBlockId: _audit.rows[0]?.block._id,
-              previousHash: _audit.rows[0]?.block.blockHash,
-              blockHash: "f4e3d2c1b0a9f4e3d2c1b0a9f4e3d2c1b0a9f4e3d2c1b0a9f4e3d2c1b0a9abcd",
-              changeCount: 4,
-              addedCount: 2,
-              removedCount: 1,
-              changedCount: 1,
-            },
-            changes: [
-              {
-                _id: "__dummy_change_1__",
-                repoId: _audit.rows[0]?.block.repoId ?? "",
-                blockId: "__dummy_block_2__",
-                platform: "github",
-                username: "alice",
-                handle: "github:alice",
-                action: "added" as const,
-                afterType: "vouch" as const,
-              },
-              {
-                _id: "__dummy_change_2__",
-                repoId: _audit.rows[0]?.block.repoId ?? "",
-                blockId: "__dummy_block_2__",
-                platform: "github",
-                username: "bob",
-                handle: "github:bob",
-                action: "added" as const,
-                afterType: "vouch" as const,
-              },
-              {
-                _id: "__dummy_change_3__",
-                repoId: _audit.rows[0]?.block.repoId ?? "",
-                blockId: "__dummy_block_2__",
-                platform: "github",
-                username: "eve",
-                handle: "github:eve",
-                action: "removed" as const,
-                beforeType: "vouch" as const,
-              },
-              {
-                _id: "__dummy_change_4__",
-                repoId: _audit.rows[0]?.block.repoId ?? "",
-                blockId: "__dummy_block_2__",
-                platform: "github",
-                username: "carol",
-                handle: "github:carol",
-                action: "changed" as const,
-                beforeType: "vouch" as const,
-                afterType: "denounce" as const,
-              },
-            ],
-          },
-          ..._audit.rows,
-        ],
-      }
-    : _audit
-  // ── END DEBUG ──
 
   const handleReindex = () => {
     startTransition(async () => {
