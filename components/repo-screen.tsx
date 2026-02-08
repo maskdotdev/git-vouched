@@ -1,16 +1,94 @@
 "use client"
 
 import Link from "next/link"
-import { useAction, useQuery } from "convex/react"
-import { ArrowLeft, ArrowRight, DatabaseZap, Fingerprint, GitBranch, ShieldCheck, ShieldOff } from "lucide-react"
+import { useQuery } from "convex/react"
+import {
+  ArrowLeft,
+  ArrowRight,
+  Blocks,
+  Clock3,
+  DatabaseZap,
+  Fingerprint,
+  GitBranch,
+  GitCommitVertical,
+  Link2,
+  ShieldCheck,
+  ShieldOff,
+  UserRound,
+} from "lucide-react"
 import { useState, useTransition } from "react"
 
-import { type RepositoryOverview, api } from "@/convex/api"
+import { type RepositoryAuditOverview, type RepositoryOverview, api } from "@/convex/api"
 import { Button } from "@/components/ui/button"
 import { getValidConvexUrl } from "@/lib/convex-url"
 
 type RepoScreenProps = {
   slug: string
+}
+
+async function requestRepoIndex(repo: string): Promise<
+  | {
+      status: "indexed"
+      entriesIndexed: number
+      filePath: string
+      changesDetected: number
+      auditRecorded: boolean
+      auditHeight?: number
+    }
+  | {
+      status: "error" | "missing_file" | "missing_repo"
+      message: string
+    }
+> {
+  const response = await fetch("/api/index", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ repo }),
+  })
+
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    const message =
+      typeof payload === "object" &&
+      payload !== null &&
+      "message" in payload &&
+      typeof (payload as { message?: unknown }).message === "string"
+        ? (payload as { message: string }).message
+        : "Re-index failed."
+
+    return {
+      status: "error",
+      message,
+    }
+  }
+
+  return payload as
+    | {
+        status: "indexed"
+        entriesIndexed: number
+        filePath: string
+        changesDetected: number
+        auditRecorded: boolean
+        auditHeight?: number
+      }
+    | {
+        status: "error" | "missing_file" | "missing_repo"
+        message: string
+      }
+}
+
+function formatDateTime(timestamp: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(timestamp))
+}
+
+function shortHash(input?: string | null) {
+  if (!input) return "none"
+  return input.slice(0, 12)
 }
 
 export function RepoScreen({ slug }: RepoScreenProps) {
@@ -41,16 +119,18 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
   const [message, setMessage] = useState<string | null>(null)
 
   const data = useQuery(api.vouch.getRepository, { slug }) as RepositoryOverview | undefined
-  const indexRepo = useAction(api.vouch.indexGithubRepo)
+  const audit = useQuery(api.vouch.listRepositoryAudit, { slug, limit: 12 }) as
+    | RepositoryAuditOverview
+    | undefined
 
   const handleReindex = () => {
     startTransition(async () => {
       setMessage(null)
       try {
-        const result = await indexRepo({ repo: slug })
+        const result = await requestRepoIndex(slug)
         setMessage(
           result.status === "indexed"
-            ? `Indexed ${result.entriesIndexed} entries from ${result.filePath}.`
+            ? `Indexed ${result.entriesIndexed} entries from ${result.filePath}. ${result.changesDetected} change${result.changesDetected === 1 ? "" : "s"} detected${result.auditRecorded ? `, chain block #${result.auditHeight ?? "?"} recorded.` : ", no new block recorded."}`
             : result.message ?? "Re-index failed."
         )
       } catch (error) {
@@ -198,6 +278,187 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
         {data.entries.length === 0 && (
           <div className="card-paper rounded-xl border-dashed p-8 text-center">
             <p className="text-sm text-muted-foreground">No trust entries found in this repository.</p>
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h2 className="mb-5 flex items-center gap-2 font-[var(--font-display)] text-lg font-semibold text-foreground">
+          <Blocks className="size-4 text-ring" />
+          Audit chain
+        </h2>
+
+        {audit === undefined ? (
+          <div className="card-paper rounded-xl p-8 text-center">
+            <p className="text-sm text-muted-foreground">Loading chain history&hellip;</p>
+          </div>
+        ) : audit?.rows.length ? (
+          <div className="audit-graph relative">
+            {audit.rows.map((row, i) => {
+              const isFirst = i === 0
+              const isLast = i === audit.rows.length - 1
+              const hasChanges = row.block.changeCount > 0
+
+              return (
+                <div
+                  key={row.block._id}
+                  className="audit-commit animate-rise relative grid"
+                  style={{
+                    gridTemplateColumns: "32px 1fr",
+                    animationDelay: `${i * 60}ms`,
+                  }}
+                >
+                  {/* ── Branch rail ── */}
+                  <div className="relative flex flex-col items-center">
+                    {/* Vertical line – top half */}
+                    {!isFirst && (
+                      <div className="audit-rail-segment w-px grow bg-border" />
+                    )}
+                    {isFirst && <div className="grow" />}
+
+                    {/* Commit node */}
+                    <div
+                      className={`relative z-10 flex size-7 shrink-0 items-center justify-center rounded-full border-2 ${
+                        hasChanges
+                          ? "border-primary bg-primary/15 text-primary"
+                          : "border-border bg-muted text-muted-foreground"
+                      }`}
+                    >
+                      <GitCommitVertical className="size-3.5" />
+                    </div>
+
+                    {/* Vertical line – bottom half */}
+                    {!isLast && (
+                      <div className="audit-rail-segment w-px grow bg-border" />
+                    )}
+                    {isLast && <div className="grow" />}
+                  </div>
+
+                  {/* ── Block card ── */}
+                  <article className="card-paper my-1.5 ml-3 rounded-xl p-5">
+                    {/* Header: block # + hash + timestamp */}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                        <span className="pill-neutral rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wider uppercase">
+                          Block #{row.block.height}
+                        </span>
+                        <code className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs text-primary/80">
+                          {shortHash(row.block.blockHash)}
+                        </code>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Clock3 className="size-3.5" />
+                        <span>{formatDateTime(row.block.indexedAt)}</span>
+                      </div>
+                    </div>
+
+                    {/* Meta row: prev hash, actor, links */}
+                    <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                      <span className="inline-flex items-center gap-1 font-mono">
+                        <span className="text-muted-foreground/50">parent</span>{" "}
+                        <code className="rounded border border-border bg-muted px-1.5 py-0.5 text-[11px]">
+                          {shortHash(row.block.previousHash)}
+                        </code>
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <UserRound className="size-3.5" />
+                        {row.block.commitActor ?? "unknown"}
+                      </span>
+                      {row.block.commitUrl ? (
+                        <a
+                          href={row.block.commitUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-accent hover:text-accent/80"
+                        >
+                          <Link2 className="size-3.5" />
+                          commit
+                        </a>
+                      ) : null}
+                      {row.block.sourceUrl ? (
+                        <a
+                          href={row.block.sourceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-accent hover:text-accent/80"
+                        >
+                          <Link2 className="size-3.5" />
+                          source
+                        </a>
+                      ) : null}
+                    </div>
+
+                    {/* Diff stats */}
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                      {row.block.addedCount > 0 && (
+                        <span className="pill-vouch rounded-full px-2 py-0.5 font-medium">
+                          +{row.block.addedCount} added
+                        </span>
+                      )}
+                      {row.block.removedCount > 0 && (
+                        <span className="pill-denounce rounded-full px-2 py-0.5 font-medium">
+                          &minus;{row.block.removedCount} removed
+                        </span>
+                      )}
+                      {row.block.changedCount > 0 && (
+                        <span className="pill-neutral rounded-full px-2 py-0.5 font-medium">
+                          ~{row.block.changedCount} changed
+                        </span>
+                      )}
+                      {row.block.changeCount === 0 && (
+                        <span className="pill-neutral rounded-full px-2 py-0.5 font-medium">
+                          no changes
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Diff detail */}
+                    {row.changes.length > 0 ? (
+                      <ul className="mt-4 space-y-1 border-l-2 border-border pl-3 text-sm">
+                        {row.changes.slice(0, 8).map((change) => (
+                          <li
+                            key={change._id}
+                            className="font-mono text-muted-foreground"
+                          >
+                            <span
+                              className={
+                                change.action === "added"
+                                  ? "text-chart-2"
+                                  : change.action === "removed"
+                                    ? "text-destructive"
+                                    : "text-chart-1"
+                              }
+                            >
+                              {change.action === "added"
+                                ? "+"
+                                : change.action === "removed"
+                                  ? "−"
+                                  : "~"}
+                            </span>{" "}
+                            <span className="text-foreground/90">{change.handle}</span>
+                            {change.action === "changed" ? (
+                              <span className="text-muted-foreground/60">
+                                {" "}
+                                ({change.beforeType ?? "?"} → {change.afterType ?? "?"})
+                              </span>
+                            ) : null}
+                          </li>
+                        ))}
+                        {row.changes.length > 8 ? (
+                          <li className="text-xs text-muted-foreground/50">
+                            … {row.changes.length - 8} more
+                          </li>
+                        ) : null}
+                      </ul>
+                    ) : null}
+                  </article>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="card-paper rounded-xl border-dashed p-8 text-center">
+            <p className="text-sm text-muted-foreground">No chain history recorded yet.</p>
           </div>
         )}
       </section>
