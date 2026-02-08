@@ -1287,6 +1287,9 @@ export const searchHandles = queryGeneric({
     if (!username) {
       return []
     }
+    if (username.length < 2) {
+      return []
+    }
 
     const readLimit = Math.min(Math.max(limit * 10, 30), 120)
     const hits = await ctx.db
@@ -1340,9 +1343,9 @@ export const searchHandles = queryGeneric({
       })
       .slice(0, limit)
 
-    return rows.map((row) => ({
+    return rows.map(({ repoIds, ...row }) => ({
       ...row,
-      repositories: row.repoIds.size,
+      repositories: repoIds.size,
     }))
   },
 })
