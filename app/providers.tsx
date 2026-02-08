@@ -3,14 +3,16 @@
 import { ConvexProvider, ConvexReactClient } from "convex/react"
 import { ReactNode, useMemo } from "react"
 
+import { getValidConvexUrl } from "@/lib/convex-url"
+
 export function Providers({ children }: { children: ReactNode }) {
+  const convexUrl = getValidConvexUrl()
   const convex = useMemo(() => {
-    const url = process.env.NEXT_PUBLIC_CONVEX_URL
-    if (!url) {
+    if (!convexUrl) {
       return null
     }
-    return new ConvexReactClient(url)
-  }, [])
+    return new ConvexReactClient(convexUrl)
+  }, [convexUrl])
 
   if (!convex) {
     return <>{children}</>
