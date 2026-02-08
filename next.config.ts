@@ -12,7 +12,7 @@ const contentSecurityPolicy = [
   "font-src 'self' data: https:",
   "style-src 'self' 'unsafe-inline'",
   "script-src 'self' 'unsafe-inline'",
-  "connect-src 'self' https:",
+  "connect-src 'self' https: wss://*.convex.cloud wss://*.convex.site",
   "upgrade-insecure-requests",
 ].join("; ");
 
