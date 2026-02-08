@@ -18,38 +18,10 @@ import { LeaderboardTable } from "@/components/leaderboard-table"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { getValidConvexUrl } from "@/lib/convex-url"
+import { requestRepoIndex } from "@/lib/request-repo-index"
 
 function normalizeHandle(input: string) {
   return input.trim().replace(/^@/, "")
-}
-
-async function requestRepoIndex(repo: string): Promise<IndexRepoResult> {
-  const response = await fetch("/api/index", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ repo }),
-  })
-
-  const payload = await response.json().catch(() => null)
-  if (!response.ok) {
-    const message =
-      typeof payload === "object" &&
-      payload !== null &&
-      "message" in payload &&
-      typeof (payload as { message?: unknown }).message === "string"
-        ? (payload as { message: string }).message
-        : "Indexing failed."
-
-    return {
-      status: "error",
-      slug: repo.trim(),
-      message,
-    }
-  }
-
-  return payload as IndexRepoResult
 }
 
 export function HomeScreen() {

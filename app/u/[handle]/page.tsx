@@ -6,6 +6,5 @@ export default async function UserPage({
   params: Promise<{ handle: string }>
 }) {
   const { handle } = await params
-  return <UserScreen handle={decodeURIComponent(handle)} />
+  return <UserScreen handle={handle} />
 }
-

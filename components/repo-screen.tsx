@@ -18,65 +18,17 @@ import {
 } from "lucide-react"
 import { useState, useTransition } from "react"
 
-import { type RepositoryAuditOverview, type RepositoryOverview, api } from "@/convex/api"
+import {
+  type RepositoryAuditOverview,
+  type RepositoryOverview,
+  api,
+} from "@/convex/api"
 import { Button } from "@/components/ui/button"
 import { getValidConvexUrl } from "@/lib/convex-url"
+import { requestRepoIndex } from "@/lib/request-repo-index"
 
 type RepoScreenProps = {
   slug: string
-}
-
-async function requestRepoIndex(repo: string): Promise<
-  | {
-      status: "indexed"
-      entriesIndexed: number
-      filePath: string
-      changesDetected: number
-      auditRecorded: boolean
-      auditHeight?: number
-    }
-  | {
-      status: "error" | "missing_file" | "missing_repo"
-      message: string
-    }
-> {
-  const response = await fetch("/api/index", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ repo }),
-  })
-
-  const payload = await response.json().catch(() => null)
-  if (!response.ok) {
-    const message =
-      typeof payload === "object" &&
-      payload !== null &&
-      "message" in payload &&
-      typeof (payload as { message?: unknown }).message === "string"
-        ? (payload as { message: string }).message
-        : "Re-index failed."
-
-    return {
-      status: "error",
-      message,
-    }
-  }
-
-  return payload as
-    | {
-        status: "indexed"
-        entriesIndexed: number
-        filePath: string
-        changesDetected: number
-        auditRecorded: boolean
-        auditHeight?: number
-      }
-    | {
-        status: "error" | "missing_file" | "missing_repo"
-        message: string
-      }
 }
 
 function formatDateTime(timestamp: number) {

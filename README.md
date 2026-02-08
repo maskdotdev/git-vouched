@@ -38,11 +38,17 @@ cp .env.local.example .env.local
 
 Fill:
 
-- `NEXT_PUBLIC_CONVEX_URL`: your Convex deployment URL
-- `INDEXER_SECRET` (recommended): shared secret used between Next.js and Convex for indexing requests (must match in both environments)
+- `NEXT_PUBLIC_CONVEX_URL`: client-facing Convex deployment URL
+- `CONVEX_HTTP_URL` (recommended): server-side Convex URL used by the Next.js index route
+- `INDEXER_SECRET` (required): shared secret used between Next.js and Convex for indexing requests (must match in both environments)
 - `GITHUB_TOKEN` (optional but recommended): used for scheduled background reindexing to improve GitHub API limits
+- `PUBLIC_INDEXING_ENABLED` (optional): set to `true` to allow public manual indexing in production
+- `PUBLIC_INDEXING_ALLOWED_OWNERS` (optional): comma-separated GitHub owners that can be indexed when public indexing is enabled
+- `CONVEX_ALLOWED_HOSTS` (optional): comma-separated extra allowed hosts for `CONVEX_HTTP_URL` if you use a custom Convex domain
+- `INDEXER_UPSTREAM_TIMEOUT_MS` (optional): timeout in milliseconds for Next.js -> Convex indexing requests (default `15000`)
+- `GITHUB_FETCH_TIMEOUT_MS` (optional): timeout in milliseconds for Convex -> GitHub API requests (default `15000`)
 
-`INDEXER_SECRET` falls back to `GITHUB_TOKEN` if unset, but setting a dedicated secret is safer.
+By default, public manual indexing is disabled in production unless `PUBLIC_INDEXING_ENABLED=true`.
 
 3. Configure Convex deployment (interactive):
 

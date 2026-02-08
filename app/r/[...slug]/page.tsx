@@ -6,6 +6,5 @@ export default async function RepoPage({
   params: Promise<{ slug: string[] }>
 }) {
   const { slug } = await params
-  return <RepoScreen slug={decodeURIComponent(slug.join("/"))} />
+  return <RepoScreen slug={slug.join("/")} />
 }
-

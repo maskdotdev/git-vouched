@@ -16,13 +16,7 @@ function json(body: unknown, status = 200) {
 }
 
 function getIndexerSecret() {
-  const explicit = process.env.INDEXER_SECRET?.trim()
-  if (explicit) {
-    return explicit
-  }
-
-  const fallback = process.env.GITHUB_TOKEN?.trim()
-  return fallback || null
+  return process.env.INDEXER_SECRET?.trim() || null
 }
 
 http.route({
@@ -33,8 +27,7 @@ http.route({
     if (!configuredSecret) {
       return json(
         {
-          message:
-            "Indexer secret is not configured. Set INDEXER_SECRET (recommended) or GITHUB_TOKEN.",
+          message: "Indexer secret is not configured. Set INDEXER_SECRET.",
         },
         503
       )

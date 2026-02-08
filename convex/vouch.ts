@@ -42,6 +42,23 @@ type LeaderboardDelta = {
 
 const GITHUB_ACCEPT = "application/vnd.github+json"
 const GITHUB_API_VERSION = "2022-11-28"
+const GITHUB_FETCH_TIMEOUT_MS = parsePositiveInteger(
+  process.env.GITHUB_FETCH_TIMEOUT_MS,
+  15_000
+)
+
+function parsePositiveInteger(value: string | undefined, fallback: number) {
+  if (!value) {
+    return fallback
+  }
+
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    return fallback
+  }
+
+  return parsed
+}
 
 function decodeBase64Utf8(base64Content: string): string {
   const binary = atob(base64Content.replaceAll("\n", ""))
@@ -312,7 +329,26 @@ async function githubFetch(
     headers.Authorization = `Bearer ${token}`
   }
 
-  const response = await fetch(`https://api.github.com${path}`, { headers })
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), GITHUB_FETCH_TIMEOUT_MS)
+
+  let response: Response
+  try {
+    response = await fetch(`https://api.github.com${path}`, {
+      headers,
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return { ok: false, status: 504, message: "GitHub API request timed out." }
+    }
+
+    const message = error instanceof Error ? error.message : "GitHub API request failed."
+    return { ok: false, status: 502, message }
+  } finally {
+    clearTimeout(timeoutId)
+  }
+
   const text = await response.text()
 
   let payload: unknown = null
