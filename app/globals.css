@@ -279,9 +279,19 @@
       0 0 12px oklch(0.66 0.19 35 / 10%);
   }
 
+  /* Connector line transition */
+  .audit-connector div {
+    transition: background-color 0.3s ease;
+  }
+
   /* Hover: make the rail segment above this commit highlight */
   .audit-commit:hover .audit-rail-segment {
     background-color: oklch(0.50 0.10 35);
+  }
+
+  /* Hover: highlight the connector */
+  .audit-commit:hover .audit-connector div {
+    background-color: oklch(0.50 0.10 35) !important;
   }
 
   /* Hover: scale the commit node slightly */
