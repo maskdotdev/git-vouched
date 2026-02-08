@@ -1,22 +1,25 @@
 import type { Metadata } from "next";
-import { Fraunces, IBM_Plex_Mono, Manrope } from "next/font/google";
+import { DM_Sans, Newsreader, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
 
-const manrope = Manrope({
+const dmSans = DM_Sans({
   variable: "--font-geist-sans",
   subsets: ["latin"],
 });
 
-const fraunces = Fraunces({
+const newsreader = Newsreader({
   variable: "--font-display",
   subsets: ["latin"],
+  style: ["normal", "italic"],
+  preload: false,
 });
 
-const plexMono = IBM_Plex_Mono({
+const jetbrainsMono = JetBrains_Mono({
   variable: "--font-geist-mono",
-  weight: ["400", "500"],
+  weight: ["400"],
   subsets: ["latin"],
+  preload: false,
 });
 
 export const metadata: Metadata = {
@@ -31,7 +34,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${manrope.variable} ${fraunces.variable} ${plexMono.variable} antialiased`}>
+      <body className={`${dmSans.variable} ${newsreader.variable} ${jetbrainsMono.variable} antialiased`}>
         <Providers>{children}</Providers>
       </body>
     </html>
