@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check PR Author Vouch Status
-        uses: mitchellh/vouch/action/check-pr@main
+        uses: mitchellh/vouch/action/check-pr@d30c6a4e7a599cb3409251dcdd97a5724d7840f6
         with:
           pr-number: ${{ github.event.pull_request.number }}
           repo: ${{ github.repository }}
@@ -24,4 +24,3 @@ jobs:
           vouched-file: .github/VOUCHED.td
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

@@ -1,6 +1,6 @@
 import { cronJobs } from "convex/server"
 
-import { api } from "./_generated/api"
+import { internalApi } from "./api"
 
 const crons = cronJobs()
 
@@ -8,7 +8,7 @@ const crons = cronJobs()
 crons.interval(
   "reindex tracked repositories",
   { hours: 1 },
-  api.vouch.reindexTrackedRepos,
+  internalApi.vouch.reindexTrackedRepos,
   {
     limit: 25,
   }

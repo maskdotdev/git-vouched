@@ -39,7 +39,10 @@ cp .env.local.example .env.local
 Fill:
 
 - `NEXT_PUBLIC_CONVEX_URL`: your Convex deployment URL
-- `GITHUB_TOKEN` (optional but recommended): raises GitHub API rate limits
+- `INDEXER_SECRET` (recommended): shared secret used between Next.js and Convex for indexing requests (must match in both environments)
+- `GITHUB_TOKEN` (optional but recommended): used for scheduled background reindexing to improve GitHub API limits
+
+`INDEXER_SECRET` falls back to `GITHUB_TOKEN` if unset, but setting a dedicated secret is safer.
 
 3. Configure Convex deployment (interactive):
 
@@ -66,3 +69,4 @@ Open [http://localhost:3000](http://localhost:3000).
 - GitHub-only indexing
 - Single-file snapshot per repo (latest replaces prior entries)
 - No auth/admin panel yet (intentionally read-only UX)
+- Private repositories are intentionally rejected to prevent accidental ingestion of non-public data

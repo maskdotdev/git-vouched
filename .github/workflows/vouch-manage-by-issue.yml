@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Process Vouch Command
-        uses: mitchellh/vouch/action/manage-by-issue@main
+        uses: mitchellh/vouch/action/manage-by-issue@d30c6a4e7a599cb3409251dcdd97a5724d7840f6
         with:
           repo: ${{ github.repository }}
           issue-id: ${{ github.event.issue.number }}
@@ -30,4 +30,3 @@ jobs:
           vouched-file: .github/VOUCHED.td
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

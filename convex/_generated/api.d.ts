@@ -9,6 +9,8 @@
  */
 
 import type * as api_ from "../api.js";
+import type * as crons from "../crons.js";
+import type * as http from "../http.js";
 import type * as vouch from "../vouch.js";
 
 import type {
@@ -19,6 +21,8 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   api: typeof api_;
+  crons: typeof crons;
+  http: typeof http;
   vouch: typeof vouch;
 }>;
 

@@ -1,13 +1,43 @@
-import { actionGeneric, mutationGeneric, queryGeneric } from "convex/server"
+import {
+  internalActionGeneric,
+  internalMutationGeneric,
+  internalQueryGeneric,
+  paginationOptsValidator,
+  queryGeneric,
+} from "convex/server"
 import { ConvexError, v } from "convex/values"
 
-import { api } from "./api"
+import { internalApi } from "./api"
 
 type ParsedEntry = {
   platform: string
   username: string
   type: "vouch" | "denounce"
   details?: string
+}
+
+type NormalizedEntry = ParsedEntry & {
+  handle: string
+}
+
+type AuditChange = {
+  platform: string
+  username: string
+  handle: string
+  action: "added" | "removed" | "changed"
+  beforeType?: "vouch" | "denounce"
+  afterType?: "vouch" | "denounce"
+  beforeDetails?: string
+  afterDetails?: string
+}
+
+type LeaderboardDelta = {
+  platform: string
+  username: string
+  handle: string
+  vouchedDelta: number
+  denouncedDelta: number
+  repositoriesDelta: number
 }
 
 const GITHUB_ACCEPT = "application/vnd.github+json"
@@ -88,6 +118,187 @@ function parseTrustdown(input: string): ParsedEntry[] {
   })
 }
 
+function normalizeEntry(entry: ParsedEntry): NormalizedEntry {
+  const platform = entry.platform.trim().toLowerCase()
+  const username = entry.username.trim().toLowerCase().replace(/^@/, "")
+  return {
+    ...entry,
+    platform,
+    username,
+    handle: `${platform}:${username}`,
+  }
+}
+
+function normalizeStoredEntry(entry: {
+  platform: string
+  username: string
+  type: "vouch" | "denounce"
+  details?: string
+}): NormalizedEntry {
+  return normalizeEntry({
+    platform: entry.platform,
+    username: entry.username,
+    type: entry.type,
+    details: entry.details,
+  })
+}
+
+function computeAuditChanges(previous: NormalizedEntry[], next: NormalizedEntry[]): AuditChange[] {
+  const previousMap = new Map(previous.map((entry) => [entry.handle, entry]))
+  const nextMap = new Map(next.map((entry) => [entry.handle, entry]))
+  const handles = Array.from(new Set([...previousMap.keys(), ...nextMap.keys()])).sort((a, b) =>
+    a.localeCompare(b)
+  )
+
+  const changes: AuditChange[] = []
+  for (const handle of handles) {
+    const before = previousMap.get(handle)
+    const after = nextMap.get(handle)
+
+    if (!before && after) {
+      changes.push({
+        platform: after.platform,
+        username: after.username,
+        handle: after.handle,
+        action: "added",
+        afterType: after.type,
+        afterDetails: after.details,
+      })
+      continue
+    }
+
+    if (before && !after) {
+      changes.push({
+        platform: before.platform,
+        username: before.username,
+        handle: before.handle,
+        action: "removed",
+        beforeType: before.type,
+        beforeDetails: before.details,
+      })
+      continue
+    }
+
+    if (!before || !after) {
+      continue
+    }
+
+    const beforeDetails = before.details ?? undefined
+    const afterDetails = after.details ?? undefined
+    const changed = before.type !== after.type || beforeDetails !== afterDetails
+
+    if (changed) {
+      changes.push({
+        platform: after.platform,
+        username: after.username,
+        handle: after.handle,
+        action: "changed",
+        beforeType: before.type,
+        afterType: after.type,
+        beforeDetails,
+        afterDetails,
+      })
+    }
+  }
+
+  return changes
+}
+
+function computeLeaderboardDeltas(changes: AuditChange[]): LeaderboardDelta[] {
+  const deltas = new Map<string, LeaderboardDelta>()
+
+  for (const change of changes) {
+    const current = deltas.get(change.handle) ?? {
+      platform: change.platform,
+      username: change.username,
+      handle: change.handle,
+      vouchedDelta: 0,
+      denouncedDelta: 0,
+      repositoriesDelta: 0,
+    }
+
+    if (change.action === "added") {
+      if (change.afterType === "vouch") {
+        current.vouchedDelta += 1
+      } else if (change.afterType === "denounce") {
+        current.denouncedDelta += 1
+      }
+      current.repositoriesDelta += 1
+    } else if (change.action === "removed") {
+      if (change.beforeType === "vouch") {
+        current.vouchedDelta -= 1
+      } else if (change.beforeType === "denounce") {
+        current.denouncedDelta -= 1
+      }
+      current.repositoriesDelta -= 1
+    } else {
+      if (change.beforeType === "vouch") {
+        current.vouchedDelta -= 1
+      } else if (change.beforeType === "denounce") {
+        current.denouncedDelta -= 1
+      }
+
+      if (change.afterType === "vouch") {
+        current.vouchedDelta += 1
+      } else if (change.afterType === "denounce") {
+        current.denouncedDelta += 1
+      }
+    }
+
+    deltas.set(change.handle, current)
+  }
+
+  return Array.from(deltas.values()).filter(
+    (delta) =>
+      delta.vouchedDelta !== 0 || delta.denouncedDelta !== 0 || delta.repositoriesDelta !== 0
+  )
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input))
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+}
+
+function extractSourceUrl(message: string | undefined, slug: string): string | undefined {
+  if (!message) {
+    return undefined
+  }
+
+  const escapedSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const pattern = new RegExp(
+    `https://github\\.com/${escapedSlug}/(?:issues|discussions)/\\d+#(?:issuecomment|discussioncomment)-\\d+`,
+    "i"
+  )
+  return message.match(pattern)?.[0]
+}
+
+function parseSourceCommentReference(sourceUrl: string): {
+  kind: "issuecomment" | "discussioncomment"
+  id: number
+} | null {
+  const match = sourceUrl.match(/#(issuecomment|discussioncomment)-(\d+)$/i)
+  if (!match) {
+    return null
+  }
+
+  const id = Number(match[2])
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    return null
+  }
+
+  const kind = match[1]?.toLowerCase()
+  if (kind !== "issuecomment" && kind !== "discussioncomment") {
+    return null
+  }
+
+  return {
+    kind,
+    id,
+  }
+}
+
 async function githubFetch(
   path: string,
   token?: string
@@ -128,7 +339,7 @@ async function githubFetch(
   return { ok: true, data: payload }
 }
 
-export const setRepositoryStatus = mutationGeneric({
+export const setRepositoryStatus = internalMutationGeneric({
   args: {
     slug: v.string(),
     owner: v.string(),
@@ -171,7 +382,7 @@ export const setRepositoryStatus = mutationGeneric({
   },
 })
 
-export const replaceRepositorySnapshot = mutationGeneric({
+export const replaceRepositorySnapshot = internalMutationGeneric({
   args: {
     slug: v.string(),
     owner: v.string(),
@@ -179,6 +390,10 @@ export const replaceRepositorySnapshot = mutationGeneric({
     defaultBranch: v.string(),
     commitSha: v.string(),
     filePath: v.string(),
+    commitUrl: v.optional(v.string()),
+    sourceUrl: v.optional(v.string()),
+    commitActor: v.optional(v.string()),
+    commitTimestamp: v.optional(v.string()),
     entries: v.array(
       v.object({
         platform: v.string(),
@@ -218,10 +433,21 @@ export const replaceRepositorySnapshot = mutationGeneric({
       throw new ConvexError("Failed to initialize repository record")
     }
 
+    const normalizedEntries = args.entries.map((entry) => normalizeEntry(entry))
+
     const existingEntries = await ctx.db
       .query("entries")
       .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
       .collect()
+
+    const existingNormalizedEntries = existingEntries.map((entry) => normalizeStoredEntry(entry))
+    const changes = computeAuditChanges(existingNormalizedEntries, normalizedEntries)
+    const leaderboardDeltas = computeLeaderboardDeltas(changes)
+    const previousBlock = await ctx.db
+      .query("auditBlocks")
+      .withIndex("by_repo_and_height", (q) => q.eq("repoId", repo._id))
+      .order("desc")
+      .first()
 
     for (const entry of existingEntries) {
       await ctx.db.delete(entry._id)
@@ -243,7 +469,7 @@ export const replaceRepositorySnapshot = mutationGeneric({
       indexedAt: now,
     })
 
-    for (const entry of args.entries) {
+    for (const entry of normalizedEntries) {
       await ctx.db.insert("entries", {
         repoId: repo._id,
         snapshotId,
@@ -255,25 +481,142 @@ export const replaceRepositorySnapshot = mutationGeneric({
       })
     }
 
+    for (const delta of leaderboardDeltas) {
+      const existingLeaderboardRow = await ctx.db
+        .query("leaderboardRows")
+        .withIndex("by_handle", (q) => q.eq("handle", delta.handle))
+        .unique()
+
+      const vouchedCount = Math.max(0, (existingLeaderboardRow?.vouchedCount ?? 0) + delta.vouchedDelta)
+      const denouncedCount = Math.max(
+        0,
+        (existingLeaderboardRow?.denouncedCount ?? 0) + delta.denouncedDelta
+      )
+      const repositories = Math.max(
+        0,
+        (existingLeaderboardRow?.repositories ?? 0) + delta.repositoriesDelta
+      )
+
+      if (repositories === 0 || (vouchedCount === 0 && denouncedCount === 0)) {
+        if (existingLeaderboardRow) {
+          await ctx.db.delete(existingLeaderboardRow._id)
+        }
+        continue
+      }
+
+      const leaderboardPayload = {
+        platform: delta.platform,
+        username: delta.username,
+        handle: delta.handle,
+        vouchedCount,
+        denouncedCount,
+        repositories,
+        score: vouchedCount - denouncedCount,
+        updatedAt: now,
+      }
+
+      if (existingLeaderboardRow) {
+        await ctx.db.patch(existingLeaderboardRow._id, leaderboardPayload)
+      } else {
+        await ctx.db.insert("leaderboardRows", leaderboardPayload)
+      }
+    }
+
+    let auditBlockHash: string | undefined
+    let auditHeight: number | undefined
+    const shouldRecordAuditBlock = previousBlock === null || changes.length > 0
+
+    if (shouldRecordAuditBlock) {
+      const addedCount = changes.filter((change) => change.action === "added").length
+      const removedCount = changes.filter((change) => change.action === "removed").length
+      const changedCount = changes.filter((change) => change.action === "changed").length
+
+      auditHeight = (previousBlock?.height ?? 0) + 1
+      const previousHash = previousBlock?.blockHash
+      const serializedBlock = JSON.stringify({
+        repo: args.slug,
+        height: auditHeight,
+        previousHash: previousHash ?? null,
+        snapshotId: String(snapshotId),
+        indexedAt: now,
+        filePath: args.filePath,
+        commitSha: args.commitSha,
+        commitUrl: args.commitUrl ?? null,
+        sourceUrl: args.sourceUrl ?? null,
+        commitActor: args.commitActor ?? null,
+        commitTimestamp: args.commitTimestamp ?? null,
+        changes: changes.map((change) => ({
+          handle: change.handle,
+          action: change.action,
+          beforeType: change.beforeType ?? null,
+          afterType: change.afterType ?? null,
+          beforeDetails: change.beforeDetails ?? null,
+          afterDetails: change.afterDetails ?? null,
+        })),
+      })
+
+      auditBlockHash = await sha256Hex(serializedBlock)
+      const blockId = await ctx.db.insert("auditBlocks", {
+        repoId: repo._id,
+        snapshotId,
+        height: auditHeight,
+        indexedAt: now,
+        source: "github",
+        filePath: args.filePath,
+        commitSha: args.commitSha,
+        commitUrl: args.commitUrl,
+        sourceUrl: args.sourceUrl,
+        commitActor: args.commitActor,
+        commitTimestamp: args.commitTimestamp,
+        previousBlockId: previousBlock?._id,
+        previousHash,
+        blockHash: auditBlockHash,
+        changeCount: changes.length,
+        addedCount,
+        removedCount,
+        changedCount,
+      })
+
+      for (const change of changes) {
+        await ctx.db.insert("auditChanges", {
+          repoId: repo._id,
+          blockId,
+          platform: change.platform,
+          username: change.username,
+          handle: change.handle,
+          action: change.action,
+          beforeType: change.beforeType,
+          afterType: change.afterType,
+          beforeDetails: change.beforeDetails,
+          afterDetails: change.afterDetails,
+        })
+      }
+    }
+
     return {
       repoId: repo._id,
       indexedAt: now,
-      entriesIndexed: args.entries.length,
+      entriesIndexed: normalizedEntries.length,
+      changesDetected: changes.length,
+      auditRecorded: shouldRecordAuditBlock,
+      auditBlockHash,
+      auditHeight,
     }
   },
 })
 
-export const indexGithubRepo = actionGeneric({
+export const indexGithubRepo = internalActionGeneric({
   args: {
     repo: v.string(),
+    allowAuthenticatedGithub: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const normalized = normalizeGithubSlug(args.repo)
-    const token = process.env.GITHUB_TOKEN
+    const token = args.allowAuthenticatedGithub ? process.env.GITHUB_TOKEN : undefined
 
     const repoResponse = await githubFetch(`/repos/${normalized.slug}`, token)
     if (!repoResponse.ok) {
-      await ctx.runMutation(api.vouch.setRepositoryStatus, {
+      await ctx.runMutation(internalApi.vouch.setRepositoryStatus, {
         slug: normalized.slug,
         owner: normalized.owner,
         name: normalized.name,
@@ -292,13 +635,35 @@ export const indexGithubRepo = actionGeneric({
     const repoData = repoResponse.data as {
       default_branch?: string
       pushed_at?: string
+      private?: boolean
     }
     const defaultBranch = repoData.default_branch ?? "main"
+    if (repoData.private) {
+      const message = "Private repositories are not supported."
+      await ctx.runMutation(internalApi.vouch.setRepositoryStatus, {
+        slug: normalized.slug,
+        owner: normalized.owner,
+        name: normalized.name,
+        defaultBranch,
+        status: "error",
+        lastError: message,
+      })
+
+      return {
+        status: "error",
+        slug: normalized.slug,
+        message,
+      } as const
+    }
 
     const candidates = [".github/VOUCHED.td", "VOUCHED.td"]
     let selectedPath: string | null = null
     let fileContent: string | null = null
     let commitSha = ""
+    let commitUrl: string | undefined
+    let sourceUrl: string | undefined
+    let commitActor: string | undefined
+    let commitTimestamp: string | undefined
 
     for (const path of candidates) {
       const fileResponse = await githubFetch(
@@ -311,7 +676,7 @@ export const indexGithubRepo = actionGeneric({
           continue
         }
 
-        await ctx.runMutation(api.vouch.setRepositoryStatus, {
+        await ctx.runMutation(internalApi.vouch.setRepositoryStatus, {
           slug: normalized.slug,
           owner: normalized.owner,
           name: normalized.name,
@@ -344,7 +709,7 @@ export const indexGithubRepo = actionGeneric({
     }
 
     if (!selectedPath || !fileContent) {
-      await ctx.runMutation(api.vouch.setRepositoryStatus, {
+      await ctx.runMutation(internalApi.vouch.setRepositoryStatus, {
         slug: normalized.slug,
         owner: normalized.owner,
         name: normalized.name,
@@ -360,14 +725,68 @@ export const indexGithubRepo = actionGeneric({
       } as const
     }
 
+    const commitsResponse = await githubFetch(
+      `/repos/${normalized.slug}/commits?path=${encodeURIComponent(selectedPath)}&sha=${encodeURIComponent(defaultBranch)}&per_page=1`,
+      token
+    )
+
+    if (commitsResponse.ok) {
+      const commits = Array.isArray(commitsResponse.data) ? commitsResponse.data : []
+      const latestCommit = commits[0] as
+        | {
+            sha?: string
+            html_url?: string
+            author?: { login?: string | null } | null
+            commit?: {
+              message?: string | null
+              author?: { name?: string | null; date?: string | null } | null
+              committer?: { name?: string | null; date?: string | null } | null
+            } | null
+          }
+        | undefined
+
+      if (latestCommit) {
+        commitSha = latestCommit.sha ?? commitSha
+        commitUrl = latestCommit.html_url ?? undefined
+        sourceUrl = extractSourceUrl(latestCommit.commit?.message ?? undefined, normalized.slug)
+        commitActor =
+          latestCommit.author?.login?.toLowerCase() ??
+          latestCommit.commit?.author?.name ??
+          latestCommit.commit?.committer?.name ??
+          undefined
+        commitTimestamp =
+          latestCommit.commit?.author?.date ?? latestCommit.commit?.committer?.date ?? undefined
+      }
+    }
+
+    const sourceRef = sourceUrl ? parseSourceCommentReference(sourceUrl) : null
+    if (sourceRef && (!commitActor || commitActor.endsWith("[bot]"))) {
+      const endpoint =
+        sourceRef.kind === "issuecomment"
+          ? `/repos/${normalized.slug}/issues/comments/${sourceRef.id}`
+          : `/repos/${normalized.slug}/discussions/comments/${sourceRef.id}`
+      const sourceResponse = await githubFetch(endpoint, token)
+
+      if (sourceResponse.ok) {
+        const sourceActor = (sourceResponse.data as { user?: { login?: string | null } }).user?.login
+        if (sourceActor) {
+          commitActor = sourceActor.toLowerCase()
+        }
+      }
+    }
+
     const entries = parseTrustdown(fileContent)
-    const result = await ctx.runMutation(api.vouch.replaceRepositorySnapshot, {
+    const result = await ctx.runMutation(internalApi.vouch.replaceRepositorySnapshot, {
       slug: normalized.slug,
       owner: normalized.owner,
       name: normalized.name,
       defaultBranch,
       commitSha,
       filePath: selectedPath,
+      commitUrl,
+      sourceUrl,
+      commitActor,
+      commitTimestamp,
       entries,
     })
 
@@ -376,11 +795,15 @@ export const indexGithubRepo = actionGeneric({
       slug: normalized.slug,
       filePath: selectedPath,
       entriesIndexed: result.entriesIndexed,
+      changesDetected: result.changesDetected,
+      auditRecorded: result.auditRecorded,
+      auditBlockHash: result.auditBlockHash,
+      auditHeight: result.auditHeight,
     } as const
   },
 })
 
-export const listTrackedRepoSlugs = queryGeneric({
+export const listTrackedRepoSlugs = internalQueryGeneric({
   args: {
     limit: v.optional(v.number()),
   },
@@ -398,12 +821,12 @@ export const listTrackedRepoSlugs = queryGeneric({
   },
 })
 
-export const reindexTrackedRepos = actionGeneric({
+export const reindexTrackedRepos = internalActionGeneric({
   args: {
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const slugs = await ctx.runQuery(api.vouch.listTrackedRepoSlugs, {
+    const slugs = await ctx.runQuery(internalApi.vouch.listTrackedRepoSlugs, {
       limit: args.limit ?? 25,
     })
 
@@ -421,7 +844,10 @@ export const reindexTrackedRepos = actionGeneric({
     > = []
 
     for (const slug of slugs) {
-      const result = await ctx.runAction(api.vouch.indexGithubRepo, { repo: slug })
+      const result = await ctx.runAction(internalApi.vouch.indexGithubRepo, {
+        repo: slug,
+        allowAuthenticatedGithub: true,
+      })
 
       if (result.status === "indexed") {
         indexed += 1
@@ -514,6 +940,57 @@ export const getRepository = queryGeneric({
         vouched: entries.filter((entry) => entry.type === "vouch").length,
         denounced: entries.filter((entry) => entry.type === "denounce").length,
       },
+    }
+  },
+})
+
+export const listRepositoryAudit = queryGeneric({
+  args: {
+    slug: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const normalized = normalizeGithubSlug(args.slug)
+    const limit = Math.min(Math.max(args.limit ?? 12, 1), 50)
+    const repo = await ctx.db
+      .query("repositories")
+      .withIndex("by_slug", (q) => q.eq("slug", normalized.slug))
+      .unique()
+
+    if (!repo) {
+      return null
+    }
+
+    const blocks = await ctx.db
+      .query("auditBlocks")
+      .withIndex("by_repo_and_indexed", (q) => q.eq("repoId", repo._id))
+      .order("desc")
+      .take(limit)
+
+    const rows = await Promise.all(
+      blocks.map(async (block) => {
+        const changes = await ctx.db
+          .query("auditChanges")
+          .withIndex("by_block", (q) => q.eq("blockId", block._id))
+          .collect()
+
+        changes.sort((a, b) => {
+          if (a.action !== b.action) {
+            return a.action.localeCompare(b.action)
+          }
+          return a.handle.localeCompare(b.handle)
+        })
+
+        return {
+          block,
+          changes,
+        }
+      })
+    )
+
+    return {
+      repo,
+      rows,
     }
   },
 })
@@ -660,14 +1137,16 @@ export const searchHandles = queryGeneric({
   },
 })
 
-export const listTopHandles = queryGeneric({
-  args: {
-    limit: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
-    const limit = Math.min(Math.max(args.limit ?? 12, 1), 100)
-    const entries = await ctx.db.query("entries").collect()
+export const rebuildLeaderboardRows = internalMutationGeneric({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now()
+    const existingLeaderboardRows = await ctx.db.query("leaderboardRows").collect()
+    for (const row of existingLeaderboardRows) {
+      await ctx.db.delete(row._id)
+    }
 
+    const entries = await ctx.db.query("entries").collect()
     const grouped = new Map<
       string,
       {
@@ -676,46 +1155,97 @@ export const listTopHandles = queryGeneric({
         handle: string
         vouchedCount: number
         denouncedCount: number
-        repoIds: Set<string>
+        repositories: number
       }
     >()
 
     for (const entry of entries) {
-      const existing = grouped.get(entry.handle) ?? {
+      const current = grouped.get(entry.handle) ?? {
         platform: entry.platform,
         username: entry.username,
         handle: entry.handle,
         vouchedCount: 0,
         denouncedCount: 0,
-        repoIds: new Set<string>(),
+        repositories: 0,
       }
 
       if (entry.type === "vouch") {
-        existing.vouchedCount += 1
+        current.vouchedCount += 1
       } else {
-        existing.denouncedCount += 1
+        current.denouncedCount += 1
       }
-      existing.repoIds.add(String(entry.repoId))
-      grouped.set(entry.handle, existing)
+      current.repositories += 1
+      grouped.set(entry.handle, current)
     }
 
-    return Array.from(grouped.values())
-      .map((row) => ({
+    let inserted = 0
+    for (const row of grouped.values()) {
+      await ctx.db.insert("leaderboardRows", {
         platform: row.platform,
         username: row.username,
         handle: row.handle,
         vouchedCount: row.vouchedCount,
         denouncedCount: row.denouncedCount,
-        repositories: row.repoIds.size,
+        repositories: row.repositories,
         score: row.vouchedCount - row.denouncedCount,
-      }))
-      .sort((a, b) => {
-        if (a.score !== b.score) return b.score - a.score
-        if (a.vouchedCount !== b.vouchedCount) return b.vouchedCount - a.vouchedCount
-        if (a.denouncedCount !== b.denouncedCount) return a.denouncedCount - b.denouncedCount
-        if (a.repositories !== b.repositories) return b.repositories - a.repositories
-        return a.handle.localeCompare(b.handle)
+        updatedAt: now,
       })
-      .slice(0, limit)
+      inserted += 1
+    }
+
+    return {
+      entriesProcessed: entries.length,
+      handlesMaterialized: inserted,
+    }
+  },
+})
+
+export const listTopHandles = queryGeneric({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = Math.min(Math.max(args.limit ?? 12, 1), 500)
+    const rows = await ctx.db
+      .query("leaderboardRows")
+      .withIndex("by_score")
+      .order("desc")
+      .take(limit)
+
+    return rows.map((row) => ({
+      platform: row.platform,
+      username: row.username,
+      handle: row.handle,
+      vouchedCount: row.vouchedCount,
+      denouncedCount: row.denouncedCount,
+      repositories: row.repositories,
+      score: row.score,
+    }))
+  },
+})
+
+export const listTopHandlesPaginated = queryGeneric({
+  args: {
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const result = await ctx.db
+      .query("leaderboardRows")
+      .withIndex("by_score")
+      .order("desc")
+      .paginate(args.paginationOpts)
+
+    return {
+      ...result,
+      page: result.page.map((row) => ({
+        platform: row.platform,
+        username: row.username,
+        handle: row.handle,
+        vouchedCount: row.vouchedCount,
+        denouncedCount: row.denouncedCount,
+        repositories: row.repositories,
+        score: row.score,
+      })),
+    }
   },
 })

@@ -1,4 +1,4 @@
-import { anyApi, FunctionReference } from "convex/server"
+import { anyApi, FunctionReference, type PaginationOptions, type PaginationResult } from "convex/server"
 
 export type RepoStatus = "new" | "indexed" | "missing_file" | "missing_repo" | "error"
 
@@ -33,12 +33,52 @@ export type EntryDoc = {
   details?: string
 }
 
+export type AuditBlockDoc = {
+  _id: string
+  repoId: string
+  snapshotId: string
+  height: number
+  indexedAt: number
+  source: "github"
+  filePath: string
+  commitSha: string
+  commitUrl?: string
+  sourceUrl?: string
+  commitActor?: string
+  commitTimestamp?: string
+  previousBlockId?: string
+  previousHash?: string
+  blockHash: string
+  changeCount: number
+  addedCount: number
+  removedCount: number
+  changedCount: number
+}
+
+export type AuditChangeDoc = {
+  _id: string
+  repoId: string
+  blockId: string
+  platform: string
+  username: string
+  handle: string
+  action: "added" | "removed" | "changed"
+  beforeType?: "vouch" | "denounce"
+  afterType?: "vouch" | "denounce"
+  beforeDetails?: string
+  afterDetails?: string
+}
+
 export type IndexRepoResult =
   | {
       status: "indexed"
       slug: string
       filePath: string
       entriesIndexed: number
+      changesDetected: number
+      auditRecorded: boolean
+      auditBlockHash?: string
+      auditHeight?: number
     }
   | {
       status: "missing_file" | "missing_repo" | "error"
@@ -76,6 +116,14 @@ export type RepositoryOverview = {
   }
 } | null
 
+export type RepositoryAuditOverview = {
+  repo: RepositoryDoc
+  rows: Array<{
+    block: AuditBlockDoc
+    changes: AuditChangeDoc[]
+  }>
+} | null
+
 export type UserOverview = {
   handle: string
   counts: {
@@ -110,16 +158,14 @@ export type LeaderboardRow = {
 
 type ApiShape = {
   vouch: {
-    indexGithubRepo: FunctionReference<"action", "public", { repo: string }, IndexRepoResult>
-    reindexTrackedRepos: FunctionReference<
-      "action",
-      "public",
-      { limit?: number },
-      ReindexTrackedReposResult
-    >
-    listTrackedRepoSlugs: FunctionReference<"query", "public", { limit?: number }, string[]>
     listRecentRepos: FunctionReference<"query", "public", { limit?: number }, RepositoryDoc[]>
     getRepository: FunctionReference<"query", "public", { slug: string }, RepositoryOverview>
+    listRepositoryAudit: FunctionReference<
+      "query",
+      "public",
+      { slug: string; limit?: number },
+      RepositoryAuditOverview
+    >
     getUserOverview: FunctionReference<"query", "public", { handle: string }, UserOverview>
     searchHandles: FunctionReference<
       "query",
@@ -128,14 +174,85 @@ type ApiShape = {
       HandleSearchRow[]
     >
     listTopHandles: FunctionReference<"query", "public", { limit?: number }, LeaderboardRow[]>
-    setRepositoryStatus: FunctionReference<"mutation", "public", Record<string, unknown>, string>
+    listTopHandlesPaginated: FunctionReference<
+      "query",
+      "public",
+      { paginationOpts: PaginationOptions },
+      PaginationResult<LeaderboardRow>
+    >
+  }
+}
+
+type InternalApiShape = {
+  vouch: {
+    setRepositoryStatus: FunctionReference<
+      "mutation",
+      "internal",
+      {
+        slug: string
+        owner: string
+        name: string
+        defaultBranch: string
+        status: RepoStatus
+        lastError?: string
+      },
+      string
+    >
     replaceRepositorySnapshot: FunctionReference<
       "mutation",
-      "public",
-      Record<string, unknown>,
-      { repoId: string; indexedAt: number; entriesIndexed: number }
+      "internal",
+      {
+        slug: string
+        owner: string
+        name: string
+        defaultBranch: string
+        commitSha: string
+        filePath: string
+        commitUrl?: string
+        sourceUrl?: string
+        commitActor?: string
+        commitTimestamp?: string
+        entries: Array<{
+          platform: string
+          username: string
+          type: "vouch" | "denounce"
+          details?: string
+        }>
+      },
+      {
+        repoId: string
+        indexedAt: number
+        entriesIndexed: number
+        changesDetected: number
+        auditRecorded: boolean
+        auditBlockHash?: string
+        auditHeight?: number
+      }
+    >
+    indexGithubRepo: FunctionReference<
+      "action",
+      "internal",
+      { repo: string; allowAuthenticatedGithub?: boolean },
+      IndexRepoResult
+    >
+    rebuildLeaderboardRows: FunctionReference<
+      "mutation",
+      "internal",
+      Record<string, never>,
+      {
+        entriesProcessed: number
+        handlesMaterialized: number
+      }
+    >
+    listTrackedRepoSlugs: FunctionReference<"query", "internal", { limit?: number }, string[]>
+    reindexTrackedRepos: FunctionReference<
+      "action",
+      "internal",
+      { limit?: number },
+      ReindexTrackedReposResult
     >
   }
 }
 
 export const api = anyApi as unknown as ApiShape
+export const internalApi = anyApi as unknown as InternalApiShape

@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useAction, useQuery } from "convex/react"
+import { useQuery } from "convex/react"
 import {
   ArrowRight,
   BookOpen,
@@ -14,12 +14,42 @@ import {
 import { type FormEvent, useState, useTransition } from "react"
 
 import { type IndexRepoResult, type RepositoryDoc, api } from "@/convex/api"
+import { LeaderboardTable } from "@/components/leaderboard-table"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { getValidConvexUrl } from "@/lib/convex-url"
 
 function normalizeHandle(input: string) {
   return input.trim().replace(/^@/, "")
+}
+
+async function requestRepoIndex(repo: string): Promise<IndexRepoResult> {
+  const response = await fetch("/api/index", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ repo }),
+  })
+
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    const message =
+      typeof payload === "object" &&
+      payload !== null &&
+      "message" in payload &&
+      typeof (payload as { message?: unknown }).message === "string"
+        ? (payload as { message: string }).message
+        : "Indexing failed."
+
+    return {
+      status: "error",
+      slug: repo.trim(),
+      message,
+    }
+  }
+
+  return payload as IndexRepoResult
 }
 
 export function HomeScreen() {
@@ -57,8 +87,7 @@ function HomeScreenConfigured() {
       api.vouch.searchHandles,
       normalizedSearch ? { query: normalizedSearch, limit: 8 } : "skip"
     ) ?? []
-  const leaderboard = useQuery(api.vouch.listTopHandles, { limit: 12 }) ?? []
-  const indexRepo = useAction(api.vouch.indexGithubRepo)
+  const leaderboard = useQuery(api.vouch.listTopHandles, { limit: 20 }) ?? []
 
   const handleSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -73,7 +102,7 @@ function HomeScreenConfigured() {
 
     startTransition(async () => {
       try {
-        const result = await indexRepo({ repo: repoInput })
+        const result = await requestRepoIndex(repoInput)
         setIndexResult(result)
       } catch (error) {
         setIndexResult({
@@ -164,7 +193,10 @@ function HomeScreenConfigured() {
                     <code className="rounded border border-border bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
                       {indexResult.filePath}
                     </code>{" "}
-                    ({indexResult.entriesIndexed} entries).{" "}
+                    ({indexResult.entriesIndexed} entries, {indexResult.changesDetected} change
+                    {indexResult.changesDetected === 1 ? "" : "s"}
+                    {indexResult.auditRecorded ? `, block #${indexResult.auditHeight ?? "?"}` : ", no new block"}
+                    ).{" "}
                     <Link
                       className="font-medium text-accent underline decoration-accent/40 underline-offset-2 transition hover:decoration-accent"
                       href={`/r/${indexResult.slug}`}
@@ -231,54 +263,15 @@ function HomeScreenConfigured() {
             <Trophy className="size-4 text-ring" />
             Leaderboard
           </h2>
-          <span className="text-[11px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
-            {leaderboard.length} handles
-          </span>
+          <Link
+            href="/leaderboard"
+            className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-accent"
+          >
+            View all
+            <ArrowRight className="size-3" />
+          </Link>
         </div>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {leaderboard.map((row, i) => (
-            <Link
-              key={row.handle}
-              href={`/u/${encodeURIComponent(row.handle)}`}
-              className="animate-rise card-paper group rounded-xl p-5 transition-all hover:shadow-md"
-              style={{ animationDelay: `${i * 45}ms` }}
-            >
-              <div className="flex items-start justify-between">
-                <span className="pill-neutral rounded-full px-2 py-0.5 text-[11px] font-semibold tracking-[0.08em] uppercase">
-                  #{i + 1}
-                </span>
-                <ArrowRight className="size-3.5 text-muted-foreground opacity-0 transition-all group-hover:opacity-100 group-hover:translate-x-0.5" />
-              </div>
-              <p className="mt-3 font-mono text-sm font-medium text-foreground group-hover:text-accent transition-colors">
-                {row.handle}
-              </p>
-              <p className="mt-1 text-[11px] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
-                {row.repositories} repo{row.repositories !== 1 && "s"}
-              </p>
-              <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                <span className="pill-vouch rounded-full px-2 py-0.5 font-medium">
-                  {row.vouchedCount} vouched
-                </span>
-                {row.denouncedCount > 0 ? (
-                  <span className="pill-denounce rounded-full px-2 py-0.5 font-medium">
-                    {row.denouncedCount} denounced
-                  </span>
-                ) : null}
-                <span className="pill-neutral rounded-full px-2 py-0.5 font-medium">
-                  score {row.score >= 0 ? "+" : ""}
-                  {row.score}
-                </span>
-              </div>
-            </Link>
-          ))}
-          {leaderboard.length === 0 ? (
-            <div className="col-span-full card-paper rounded-xl border-dashed p-8 text-center">
-              <p className="text-sm text-muted-foreground">
-                No indexed trust entries yet. Index a repository to populate the leaderboard.
-              </p>
-            </div>
-          ) : null}
-        </div>
+        <LeaderboardTable rows={leaderboard} compact />
       </section>
 
       {/* ─── Recently Indexed Repos ─────────────────────── */}
