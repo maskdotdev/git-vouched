@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 
-import { planEntryReconciliation } from "@/convex/entry-reconcile-plan"
+import { planEntryReconciliation } from "@/convex/entry_reconcile_plan"
 
 describe("planEntryReconciliation", () => {
   it("returns delta-only mutations", () => {

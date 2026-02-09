@@ -7,7 +7,7 @@ import {
 } from "convex/server"
 import { ConvexError, v } from "convex/values"
 
-import { planEntryReconciliation } from "./entry-reconcile-plan"
+import { planEntryReconciliation } from "./entry_reconcile_plan"
 import { internalApi } from "./api"
 
 type ParsedEntry = {
