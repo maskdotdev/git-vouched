@@ -64,7 +64,11 @@ export default defineSchema({
   })
     .index("by_handle", ["handle"])
     .index("by_username", ["username"])
-    .index("by_score", ["score", "handle"]),
+    .index("by_score", ["score", "handle"])
+    .searchIndex("search_username", {
+      searchField: "username",
+      filterFields: ["platform"],
+    }),
 
   auditBlocks: defineTable({
     repoId: v.id("repositories"),
@@ -105,4 +109,19 @@ export default defineSchema({
     .index("by_block", ["blockId"])
     .index("by_repo", ["repoId"])
     .index("by_handle", ["handle"]),
+
+  indexRateBuckets: defineTable({
+    key: v.string(),
+    count: v.number(),
+    resetAt: v.number(),
+  })
+    .index("by_key", ["key"])
+    .index("by_reset_at", ["resetAt"]),
+
+  repoIndexLocks: defineTable({
+    repo: v.string(),
+    expiresAt: v.number(),
+  })
+    .index("by_repo", ["repo"])
+    .index("by_expires_at", ["expiresAt"]),
 })

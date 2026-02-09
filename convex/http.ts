@@ -48,15 +48,38 @@ http.route({
       return json({ message: "Expected a non-empty repo string." }, 400)
     }
 
+    const requester =
+      request.headers.get("x-indexer-client")?.trim().toLowerCase() ?? ""
+    if (!requester || requester.length > 128) {
+      return json({ message: "Invalid requester identity." }, 400)
+    }
+
+    const normalizedRepo = repo.trim().toLowerCase()
+    const permit = await ctx.runMutation(internalApi.vouch.acquireIndexPermit, {
+      repo: normalizedRepo,
+      requester,
+    })
+    if (!permit.ok) {
+      return json({ message: permit.message }, permit.status)
+    }
+
     try {
       const result = await ctx.runAction(internalApi.vouch.indexGithubRepo, {
-        repo,
+        repo: normalizedRepo,
         allowAuthenticatedGithub: false,
       })
       return json(result)
     } catch (error) {
       const message = error instanceof Error ? error.message : "Indexing failed."
       return json({ message }, 500)
+    } finally {
+      try {
+        await ctx.runMutation(internalApi.vouch.releaseRepoIndexLock, {
+          repo: normalizedRepo,
+        })
+      } catch {
+        // Best-effort lock cleanup; lock also has a TTL fallback.
+      }
     }
   }),
 })

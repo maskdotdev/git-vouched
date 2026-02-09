@@ -11,7 +11,11 @@ const contentSecurityPolicy = [
   "img-src 'self' data: https:",
   "font-src 'self' data: https:",
   "style-src 'self' 'unsafe-inline'",
-  "script-src 'self' 'unsafe-inline'",
+  "script-src 'self'",
+  // Next.js needs inline bootstrap scripts; keep this for script elements only.
+  "script-src-elem 'self' 'unsafe-inline'",
+  // Block inline event handlers (onclick=...) to reduce XSS surface.
+  "script-src-attr 'none'",
   "connect-src 'self' https: wss://*.convex.cloud wss://*.convex.site",
   "upgrade-insecure-requests",
 ].join("; ");

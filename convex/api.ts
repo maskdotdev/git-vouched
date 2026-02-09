@@ -203,6 +203,13 @@ type ApiShape = {
 
 type InternalApiShape = {
   vouch: {
+    acquireIndexPermit: FunctionReference<
+      "mutation",
+      "internal",
+      { repo: string; requester: string },
+      { ok: true } | { ok: false; status: number; message: string }
+    >
+    releaseRepoIndexLock: FunctionReference<"mutation", "internal", { repo: string }, void>
     setRepositoryStatus: FunctionReference<
       "mutation",
       "internal",

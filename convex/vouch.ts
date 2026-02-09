@@ -42,6 +42,12 @@ type LeaderboardDelta = {
 
 const GITHUB_ACCEPT = "application/vnd.github+json"
 const GITHUB_API_VERSION = "2022-11-28"
+const RATE_WINDOW_MS = 60_000
+const MAX_REQUESTS_PER_WINDOW = 10
+const MAX_GLOBAL_REQUESTS_PER_WINDOW = 30
+const MAX_REPO_GLOBAL_REQUESTS_PER_WINDOW = 15
+const INDEX_LOCK_TIMEOUT_MS = 60_000
+const MAX_EXPIRED_GUARDS_TO_PRUNE = 256
 const GITHUB_FETCH_TIMEOUT_MS = parsePositiveInteger(
   process.env.GITHUB_FETCH_TIMEOUT_MS,
   15_000
@@ -69,18 +75,21 @@ function decodeBase64Utf8(base64Content: string): string {
 function normalizeGithubSlug(input: string): { owner: string; name: string; slug: string } {
   let value = input.trim()
   value = value.replace(/^https?:\/\/github\.com\//i, "")
+  value = value.replace(/^github\.com\//i, "")
+  value = value.split(/[?#]/, 1)[0] ?? value
   value = value.replace(/\.git$/i, "")
   value = value.replace(/^\/+|\/+$/g, "")
 
-  const parts = value.split("/")
-  if (parts.length < 2) {
+  const parts = value.split("/").filter(Boolean)
+  if (parts.length !== 2) {
     throw new ConvexError("Repository must be in owner/repo format")
   }
 
   const owner = parts[0]?.trim().toLowerCase()
   const name = parts[1]?.trim().toLowerCase()
+  const validPart = /^[a-z0-9._-]+$/i
 
-  if (!owner || !name) {
+  if (!owner || !name || !validPart.test(owner) || !validPart.test(name)) {
     throw new ConvexError("Repository must be in owner/repo format")
   }
 
@@ -409,6 +418,148 @@ async function githubFetch(
   return { ok: true, data: payload }
 }
 
+export const acquireIndexPermit = internalMutationGeneric({
+  args: {
+    repo: v.string(),
+    requester: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now()
+    const repo = args.repo.trim().toLowerCase()
+    const requester = args.requester.trim().toLowerCase()
+
+    if (!repo || repo.length > 200) {
+      return {
+        ok: false,
+        status: 400,
+        message: "Expected a non-empty repo string.",
+      } as const
+    }
+    if (!requester || requester.length > 128) {
+      return {
+        ok: false,
+        status: 400,
+        message: "Invalid requester identity.",
+      } as const
+    }
+
+    const expiredBuckets = await ctx.db
+      .query("indexRateBuckets")
+      .withIndex("by_reset_at", (q) => q.lt("resetAt", now))
+      .take(MAX_EXPIRED_GUARDS_TO_PRUNE)
+    for (const bucket of expiredBuckets) {
+      await ctx.db.delete(bucket._id)
+    }
+
+    const expiredLocks = await ctx.db
+      .query("repoIndexLocks")
+      .withIndex("by_expires_at", (q) => q.lt("expiresAt", now))
+      .take(MAX_EXPIRED_GUARDS_TO_PRUNE)
+    for (const lock of expiredLocks) {
+      await ctx.db.delete(lock._id)
+    }
+
+    const isRateLimited = async (key: string, maxRequests: number) => {
+      const bucket = await ctx.db
+        .query("indexRateBuckets")
+        .withIndex("by_key", (q) => q.eq("key", key))
+        .unique()
+
+      if (!bucket || bucket.resetAt <= now) {
+        if (bucket) {
+          await ctx.db.patch(bucket._id, {
+            count: 1,
+            resetAt: now + RATE_WINDOW_MS,
+          })
+        } else {
+          await ctx.db.insert("indexRateBuckets", {
+            key,
+            count: 1,
+            resetAt: now + RATE_WINDOW_MS,
+          })
+        }
+
+        return false
+      }
+
+      const nextCount = bucket.count + 1
+      await ctx.db.patch(bucket._id, {
+        count: nextCount,
+      })
+      return nextCount > maxRequests
+    }
+
+    if (await isRateLimited(`global:${requester}`, MAX_GLOBAL_REQUESTS_PER_WINDOW)) {
+      return {
+        ok: false,
+        status: 429,
+        message: "Too many indexing attempts from this client. Please wait and retry.",
+      } as const
+    }
+
+    if (await isRateLimited(`repo:${requester}:${repo}`, MAX_REQUESTS_PER_WINDOW)) {
+      return {
+        ok: false,
+        status: 429,
+        message: "Too many indexing attempts. Please wait and retry.",
+      } as const
+    }
+
+    if (await isRateLimited(`repo-global:${repo}`, MAX_REPO_GLOBAL_REQUESTS_PER_WINDOW)) {
+      return {
+        ok: false,
+        status: 429,
+        message: "This repository is being indexed too frequently. Please retry in a minute.",
+      } as const
+    }
+
+    const existingLock = await ctx.db
+      .query("repoIndexLocks")
+      .withIndex("by_repo", (q) => q.eq("repo", repo))
+      .unique()
+    if (existingLock && existingLock.expiresAt > now) {
+      return {
+        ok: false,
+        status: 409,
+        message: "This repository is already being indexed. Please wait a moment and retry.",
+      } as const
+    }
+
+    if (existingLock) {
+      await ctx.db.patch(existingLock._id, {
+        expiresAt: now + INDEX_LOCK_TIMEOUT_MS,
+      })
+    } else {
+      await ctx.db.insert("repoIndexLocks", {
+        repo,
+        expiresAt: now + INDEX_LOCK_TIMEOUT_MS,
+      })
+    }
+
+    return { ok: true } as const
+  },
+})
+
+export const releaseRepoIndexLock = internalMutationGeneric({
+  args: {
+    repo: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const repo = args.repo.trim().toLowerCase()
+    if (!repo) {
+      return
+    }
+
+    const existingLock = await ctx.db
+      .query("repoIndexLocks")
+      .withIndex("by_repo", (q) => q.eq("repo", repo))
+      .unique()
+    if (existingLock) {
+      await ctx.db.delete(existingLock._id)
+    }
+  },
+})
+
 export const setRepositoryStatus = internalMutationGeneric({
   args: {
     slug: v.string(),
@@ -425,6 +576,7 @@ export const setRepositoryStatus = internalMutationGeneric({
     lastError: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const now = Date.now()
     const existing = await ctx.db
       .query("repositories")
       .withIndex("by_slug", (q) => q.eq("slug", args.slug))
@@ -437,7 +589,8 @@ export const setRepositoryStatus = internalMutationGeneric({
       defaultBranch: args.defaultBranch,
       status: args.status,
       lastError: args.lastError,
-      lastIndexedAt: args.status === "indexed" ? Date.now() : existing?.lastIndexedAt ?? 0,
+      // Track last indexing attempt timestamp for fair cron scheduling.
+      lastIndexedAt: now,
     }
 
     if (existing) {
@@ -1298,9 +1451,9 @@ export const searchHandles = queryGeneric({
       return []
     }
 
-    const readLimit = Math.min(Math.max(limit * 10, 30), 120)
+    const readLimit = Math.min(Math.max(limit * 5, 20), 120)
     const hits = await ctx.db
-      .query("entries")
+      .query("leaderboardRows")
       .withSearchIndex("search_username", (q) =>
         platformFilter
           ? q.search("username", username).eq("platform", platformFilter)
@@ -1308,51 +1461,21 @@ export const searchHandles = queryGeneric({
       )
       .take(readLimit)
 
-    const grouped = new Map<
-      string,
-      {
-        platform: string
-        username: string
-        handle: string
-        vouchedCount: number
-        denouncedCount: number
-        repoIds: Set<string>
-      }
-    >()
-
-    for (const hit of hits) {
-      const key = hit.handle
-      const existing = grouped.get(key) ?? {
-        platform: hit.platform,
-        username: hit.username,
-        handle: hit.handle,
-        vouchedCount: 0,
-        denouncedCount: 0,
-        repoIds: new Set<string>(),
-      }
-
-      if (hit.type === "vouch") {
-        existing.vouchedCount += 1
-      } else {
-        existing.denouncedCount += 1
-      }
-      existing.repoIds.add(hit.repoId)
-      grouped.set(key, existing)
-    }
-
-    const rows = Array.from(grouped.values())
+    const rows = hits
       .sort((a, b) => {
-        const scoreA = a.vouchedCount - a.denouncedCount
-        const scoreB = b.vouchedCount - b.denouncedCount
-        if (scoreA !== scoreB) return scoreB - scoreA
+        if (a.score !== b.score) return b.score - a.score
         if (a.vouchedCount !== b.vouchedCount) return b.vouchedCount - a.vouchedCount
         return a.handle.localeCompare(b.handle)
       })
       .slice(0, limit)
 
-    return rows.map(({ repoIds, ...row }) => ({
-      ...row,
-      repositories: repoIds.size,
+    return rows.map((row) => ({
+      platform: row.platform,
+      username: row.username,
+      handle: row.handle,
+      vouchedCount: row.vouchedCount,
+      denouncedCount: row.denouncedCount,
+      repositories: row.repositories,
     }))
   },
 })

@@ -1,24 +1,21 @@
 import { NextRequest, NextResponse } from "next/server"
 
+import { normalizeGithubRepoInput } from "@/lib/github-repo"
+import { createRequesterIdentity } from "@/lib/indexer-requester"
+
 export const runtime = "nodejs"
 
-const RATE_WINDOW_MS = 60_000
-const MAX_REQUESTS_PER_WINDOW = 10
-const MAX_GLOBAL_REQUESTS_PER_WINDOW = 30
-const MAX_REPO_GLOBAL_REQUESTS_PER_WINDOW = 15
-const INDEX_LOCK_TIMEOUT_MS = 60_000
 const INDEXER_UPSTREAM_TIMEOUT_MS = parsePositiveInteger(
   process.env.INDEXER_UPSTREAM_TIMEOUT_MS,
   15_000
 )
+const INDEXER_CLIENT_COOKIE_NAME = "__gv_idx"
+const INDEXER_CLIENT_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365
+const INDEXER_CLIENT_ID_PATTERN = /^[a-f0-9]{32}$/i
 
-type RateBucket = {
-  count: number
-  resetAt: number
-}
-
-type RepoIndexLock = {
-  expiresAt: number
+type ClientIdentifier = {
+  value: string
+  shouldSetCookie: boolean
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number) {
@@ -61,30 +58,6 @@ function parseAllowedOwners() {
     .filter(Boolean)
 
   return owners.length > 0 ? new Set(owners) : null
-}
-
-function normalizeGithubRepoInput(input: string): { owner: string; name: string; slug: string } | null {
-  let value = input.trim()
-  value = value.replace(/^https?:\/\/github\.com\//i, "")
-  value = value.replace(/^github\.com\//i, "")
-  value = value.split(/[?#]/, 1)[0] ?? value
-  value = value.replace(/\.git$/i, "")
-  value = value.replace(/^\/+|\/+$/g, "")
-
-  const parts = value.split("/")
-  if (parts.length !== 2) {
-    return null
-  }
-
-  const owner = parts[0]?.trim().toLowerCase()
-  const name = parts[1]?.trim().toLowerCase()
-  const validPart = /^[a-z0-9._-]+$/i
-
-  if (!owner || !name || !validPart.test(owner) || !validPart.test(name)) {
-    return null
-  }
-
-  return { owner, name, slug: `${owner}/${name}` }
 }
 
 function getConvexBaseUrl() {
@@ -137,107 +110,66 @@ function hasAllowedOrigin(request: NextRequest) {
   }
 }
 
-function getClientIp(request: NextRequest) {
-  const cfIp = request.headers.get("cf-connecting-ip")?.trim()
-  if (cfIp) {
-    return cfIp
-  }
+function generateIndexerClientId() {
+  return crypto.randomUUID().replaceAll("-", "")
+}
 
-  const forwarded = request.headers.get("x-forwarded-for")
-  if (forwarded) {
-    const first = forwarded.split(",")[0]?.trim()
-    if (first) {
-      return first
+function getClientIdentifier(request: NextRequest): ClientIdentifier {
+  const raw = request.cookies.get(INDEXER_CLIENT_COOKIE_NAME)?.value?.trim()
+  if (raw && INDEXER_CLIENT_ID_PATTERN.test(raw)) {
+    return {
+      value: raw.toLowerCase(),
+      shouldSetCookie: false,
     }
   }
-
-  return request.headers.get("x-real-ip")?.trim() || "unknown"
-}
-
-function getRateBuckets() {
-  const globalWithBuckets = globalThis as typeof globalThis & {
-    __repoIndexRateBuckets?: Map<string, RateBucket>
-  }
-  if (!globalWithBuckets.__repoIndexRateBuckets) {
-    globalWithBuckets.__repoIndexRateBuckets = new Map()
-  }
-  return globalWithBuckets.__repoIndexRateBuckets
-}
-
-function getRepoLocks() {
-  const globalWithLocks = globalThis as typeof globalThis & {
-    __repoIndexLocks?: Map<string, RepoIndexLock>
-  }
-  if (!globalWithLocks.__repoIndexLocks) {
-    globalWithLocks.__repoIndexLocks = new Map()
-  }
-  return globalWithLocks.__repoIndexLocks
-}
-
-function pruneExpiredBuckets(now: number) {
-  const buckets = getRateBuckets()
-  if (buckets.size < 5_000) {
-    return
-  }
-
-  for (const [key, bucket] of buckets) {
-    if (bucket.resetAt <= now) {
-      buckets.delete(key)
-    }
+  return {
+    value: generateIndexerClientId(),
+    shouldSetCookie: true,
   }
 }
 
-function pruneExpiredLocks(now: number) {
-  const locks = getRepoLocks()
-  for (const [key, lock] of locks) {
-    if (lock.expiresAt <= now) {
-      locks.delete(key)
-    }
-  }
-}
-
-function isRateLimited(key: string, now: number, maxRequests: number) {
-  const buckets = getRateBuckets()
-  const previous = buckets.get(key)
-  if (!previous || previous.resetAt <= now) {
-    buckets.set(key, {
-      count: 1,
-      resetAt: now + RATE_WINDOW_MS,
-    })
-    return false
+function jsonWithClientCookie(
+  body: unknown,
+  status: number,
+  clientIdentifier: ClientIdentifier
+) {
+  const response = NextResponse.json(body, { status })
+  if (!clientIdentifier.shouldSetCookie) {
+    return response
   }
 
-  previous.count += 1
-  buckets.set(key, previous)
-  return previous.count > maxRequests
-}
-
-function acquireRepoLock(repo: string, now: number) {
-  const locks = getRepoLocks()
-  const lock = locks.get(repo)
-  if (lock && lock.expiresAt > now) {
-    return false
-  }
-  locks.set(repo, { expiresAt: now + INDEX_LOCK_TIMEOUT_MS })
-  return true
-}
-
-function releaseRepoLock(repo: string) {
-  getRepoLocks().delete(repo)
+  response.cookies.set({
+    name: INDEXER_CLIENT_COOKIE_NAME,
+    value: clientIdentifier.value,
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: INDEXER_CLIENT_COOKIE_MAX_AGE_SECONDS,
+  })
+  return response
 }
 
 export async function POST(request: NextRequest) {
+  const clientIdentifier = getClientIdentifier(request)
+  const requesterIdentity = createRequesterIdentity(
+    request.headers,
+    clientIdentifier.value
+  )
+  const respond = (body: unknown, status: number) =>
+    jsonWithClientCookie(body, status, clientIdentifier)
+
   if (!isPublicIndexingEnabled()) {
-    return NextResponse.json(
+    return respond(
       { message: "Public indexing is disabled on this deployment." },
-      { status: 403 }
+      403
     )
   }
 
   if (!hasAllowedOrigin(request)) {
-    return NextResponse.json(
+    return respond(
       { message: "Cross-origin indexing requests are not allowed." },
-      { status: 403 }
+      403
     )
   }
 
@@ -248,75 +180,43 @@ export async function POST(request: NextRequest) {
       : undefined
 
   if (typeof rawRepo !== "string" || rawRepo.trim().length === 0 || rawRepo.trim().length > 200) {
-    return NextResponse.json({ message: "Expected a non-empty repo string." }, { status: 400 })
+    return respond({ message: "Expected a non-empty repo string." }, 400)
   }
 
   const normalizedRepo = normalizeGithubRepoInput(rawRepo)
   if (!normalizedRepo) {
-    return NextResponse.json(
+    return respond(
       { message: "Repository must be a valid GitHub owner/repo or GitHub URL." },
-      { status: 400 }
+      400
     )
   }
 
   const allowedOwners = parseAllowedOwners()
   if (allowedOwners && !allowedOwners.has(normalizedRepo.owner)) {
-    return NextResponse.json(
+    return respond(
       { message: `Indexing is restricted to approved owners.` },
-      { status: 403 }
+      403
     )
   }
 
   const repo = normalizedRepo.slug
   if (repo.length > 200) {
-    return NextResponse.json({ message: "Expected a non-empty repo string." }, { status: 400 })
-  }
-
-  const now = Date.now()
-  pruneExpiredBuckets(now)
-  pruneExpiredLocks(now)
-  const ip = getClientIp(request)
-  if (isRateLimited(`global:${ip}`, now, MAX_GLOBAL_REQUESTS_PER_WINDOW)) {
-    return NextResponse.json(
-      { message: "Too many indexing attempts from this IP. Please wait and retry." },
-      { status: 429 }
-    )
-  }
-
-  if (isRateLimited(`repo:${ip}:${repo.trim().toLowerCase()}`, now, MAX_REQUESTS_PER_WINDOW)) {
-    return NextResponse.json(
-      { message: "Too many indexing attempts. Please wait and retry." },
-      { status: 429 }
-    )
-  }
-
-  if (isRateLimited(`repo-global:${repo}`, now, MAX_REPO_GLOBAL_REQUESTS_PER_WINDOW)) {
-    return NextResponse.json(
-      { message: "This repository is being indexed too frequently. Please retry in a minute." },
-      { status: 429 }
-    )
+    return respond({ message: "Expected a non-empty repo string." }, 400)
   }
 
   const secret = getIndexerSecret()
   if (!secret) {
-    return NextResponse.json(
+    return respond(
       { message: "Indexer secret is not configured. Set INDEXER_SECRET." },
-      { status: 503 }
+      503
     )
   }
 
   const convexBaseUrl = getConvexBaseUrl()
   if (!convexBaseUrl) {
-    return NextResponse.json(
+    return respond(
       { message: "Convex URL is missing or invalid. Set CONVEX_HTTP_URL (recommended)." },
-      { status: 503 }
-    )
-  }
-
-  if (!acquireRepoLock(repo, now)) {
-    return NextResponse.json(
-      { message: "This repository is already being indexed. Please wait a moment and retry." },
-      { status: 409 }
+      503
     )
   }
 
@@ -329,6 +229,7 @@ export async function POST(request: NextRequest) {
       headers: {
         "content-type": "application/json",
         "x-indexer-secret": secret,
+        "x-indexer-client": requesterIdentity,
       },
       body: JSON.stringify({ repo }),
       cache: "no-store",
@@ -345,21 +246,20 @@ export async function POST(request: NextRequest) {
           ? (result as { message: string }).message
           : "Indexing failed."
 
-      return NextResponse.json({ message }, { status: upstream.status })
+      return respond({ message }, upstream.status)
     }
 
-    return NextResponse.json(result ?? { message: "Indexing failed." }, { status: 200 })
+    return respond(result ?? { message: "Indexing failed." }, 200)
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      return NextResponse.json(
+      return respond(
         { message: "Indexer service timed out. Please retry." },
-        { status: 504 }
+        504
       )
     }
 
-    return NextResponse.json({ message: "Failed to reach indexer service." }, { status: 502 })
+    return respond({ message: "Failed to reach indexer service." }, 502)
   } finally {
     clearTimeout(timeoutId)
-    releaseRepoLock(repo)
   }
 }
