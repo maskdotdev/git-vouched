@@ -1,6 +1,7 @@
 import Link from "next/link"
 
 import type { LeaderboardRow } from "@/convex/api"
+import { getMaxAbsScore, getScoreBarWidth } from "@/lib/leaderboard-bar"
 
 const RANK_STYLES: Record<number, { bg: string; text: string; ring: string }> = {
   1: {
@@ -57,7 +58,7 @@ export function LeaderboardTable({
     )
   }
 
-  const maxScore = rows[0]?.score || 1
+  const maxAbsScore = getMaxAbsScore(rows.map((row) => row.score))
 
   return (
     <div className="card-paper overflow-hidden rounded-xl">
@@ -77,7 +78,7 @@ export function LeaderboardTable({
         <tbody>
           {rows.map((row, i) => {
             const rank = i + 1
-            const barWidth = Math.max(6, (row.score / maxScore) * 100)
+            const barWidth = getScoreBarWidth(row.score, maxAbsScore)
 
             return (
               <tr key={row.handle} className="group transition-colors hover:bg-muted/40">

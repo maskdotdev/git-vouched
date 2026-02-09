@@ -29,7 +29,9 @@ export default defineSchema({
     commitSha: v.string(),
     filePath: v.string(),
     indexedAt: v.number(),
-  }).index("by_repo", ["repoId"]),
+  })
+    .index("by_repo", ["repoId"])
+    .index("by_repo_and_indexed", ["repoId", "indexedAt"]),
 
   entries: defineTable({
     repoId: v.id("repositories"),

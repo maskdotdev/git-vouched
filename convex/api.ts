@@ -172,6 +172,12 @@ type ApiShape = {
       { slug: string; paginationOpts: PaginationOptions },
       PaginationResult<EntryDoc>
     >
+    listRepositoryEntriesPreview: FunctionReference<
+      "query",
+      "public",
+      { slug: string; limit?: number },
+      EntryDoc[]
+    >
     listRepositoryAudit: FunctionReference<
       "query",
       "public",
@@ -184,6 +190,12 @@ type ApiShape = {
       "public",
       { handle: string; paginationOpts: PaginationOptions },
       PaginationResult<UserEntryRow>
+    >
+    listUserEntriesPreview: FunctionReference<
+      "query",
+      "public",
+      { handle: string; limit?: number },
+      UserEntryRow[]
     >
     searchHandles: FunctionReference<
       "query",
@@ -206,7 +218,7 @@ type InternalApiShape = {
     acquireIndexPermit: FunctionReference<
       "mutation",
       "internal",
-      { repo: string; requester: string },
+      { repo: string; requester: string; skipRateLimit?: boolean },
       { ok: true } | { ok: false; status: number; message: string }
     >
     releaseRepoIndexLock: FunctionReference<"mutation", "internal", { repo: string }, void>

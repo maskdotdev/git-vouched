@@ -13,7 +13,12 @@ import {
 } from "lucide-react"
 import { type FormEvent, useEffect, useState, useTransition } from "react"
 
-import { type IndexRepoResult, type RepositoryDoc, api } from "@/convex/api"
+import {
+  type IndexRepoResult,
+  type LeaderboardRow,
+  type RepositoryDoc,
+  api,
+} from "@/convex/api"
 import { LeaderboardTable } from "@/components/leaderboard-table"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -24,7 +29,15 @@ function normalizeHandle(input: string) {
   return input.trim().replace(/^@/, "")
 }
 
-export function HomeScreen() {
+type HomeScreenProps = {
+  initialRecentRepos?: RepositoryDoc[]
+  initialLeaderboard?: LeaderboardRow[]
+}
+
+export function HomeScreen({
+  initialRecentRepos = [],
+  initialLeaderboard = [],
+}: HomeScreenProps) {
   if (!getValidConvexUrl()) {
     return (
       <main className="mx-auto flex min-h-screen w-full max-w-4xl items-center justify-center px-6 py-12">
@@ -42,10 +55,18 @@ export function HomeScreen() {
     )
   }
 
-  return <HomeScreenConfigured />
+  return (
+    <HomeScreenConfigured
+      initialRecentRepos={initialRecentRepos}
+      initialLeaderboard={initialLeaderboard}
+    />
+  )
 }
 
-function HomeScreenConfigured() {
+function HomeScreenConfigured({
+  initialRecentRepos,
+  initialLeaderboard,
+}: Required<HomeScreenProps>) {
   const router = useRouter()
   const [search, setSearch] = useState("")
   const [debouncedSearch, setDebouncedSearch] = useState("")
@@ -62,14 +83,18 @@ function HomeScreenConfigured() {
     return () => clearTimeout(timeoutId)
   }, [normalizedSearch])
 
-  const recentRepos = (useQuery(api.vouch.listRecentRepos, { limit: 12 }) ?? []) as RepositoryDoc[]
+  const recentRepos =
+    ((useQuery(api.vouch.listRecentRepos, { limit: 12 }) as RepositoryDoc[] | undefined) ??
+      initialRecentRepos) as RepositoryDoc[]
   const canSearch = debouncedSearch.length >= 2
   const searchMatches =
     useQuery(
       api.vouch.searchHandles,
       canSearch ? { query: debouncedSearch, limit: 8 } : "skip"
     ) ?? []
-  const leaderboard = useQuery(api.vouch.listTopHandles, { limit: 20 }) ?? []
+  const leaderboard =
+    ((useQuery(api.vouch.listTopHandles, { limit: 20 }) as LeaderboardRow[] | undefined) ??
+      initialLeaderboard) as LeaderboardRow[]
 
   const handleSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()

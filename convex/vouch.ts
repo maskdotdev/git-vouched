@@ -7,6 +7,7 @@ import {
 } from "convex/server"
 import { ConvexError, v } from "convex/values"
 
+import { planEntryReconciliation } from "./entry-reconcile-plan"
 import { internalApi } from "./api"
 
 type ParsedEntry = {
@@ -422,6 +423,7 @@ export const acquireIndexPermit = internalMutationGeneric({
   args: {
     repo: v.string(),
     requester: v.string(),
+    skipRateLimit: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const now = Date.now()
@@ -459,58 +461,60 @@ export const acquireIndexPermit = internalMutationGeneric({
       await ctx.db.delete(lock._id)
     }
 
-    const isRateLimited = async (key: string, maxRequests: number) => {
-      const bucket = await ctx.db
-        .query("indexRateBuckets")
-        .withIndex("by_key", (q) => q.eq("key", key))
-        .unique()
+    if (!args.skipRateLimit) {
+      const isRateLimited = async (key: string, maxRequests: number) => {
+        const bucket = await ctx.db
+          .query("indexRateBuckets")
+          .withIndex("by_key", (q) => q.eq("key", key))
+          .unique()
 
-      if (!bucket || bucket.resetAt <= now) {
-        if (bucket) {
-          await ctx.db.patch(bucket._id, {
-            count: 1,
-            resetAt: now + RATE_WINDOW_MS,
-          })
-        } else {
-          await ctx.db.insert("indexRateBuckets", {
-            key,
-            count: 1,
-            resetAt: now + RATE_WINDOW_MS,
-          })
+        if (!bucket || bucket.resetAt <= now) {
+          if (bucket) {
+            await ctx.db.patch(bucket._id, {
+              count: 1,
+              resetAt: now + RATE_WINDOW_MS,
+            })
+          } else {
+            await ctx.db.insert("indexRateBuckets", {
+              key,
+              count: 1,
+              resetAt: now + RATE_WINDOW_MS,
+            })
+          }
+
+          return false
         }
 
-        return false
+        const nextCount = bucket.count + 1
+        await ctx.db.patch(bucket._id, {
+          count: nextCount,
+        })
+        return nextCount > maxRequests
       }
 
-      const nextCount = bucket.count + 1
-      await ctx.db.patch(bucket._id, {
-        count: nextCount,
-      })
-      return nextCount > maxRequests
-    }
+      if (await isRateLimited(`global:${requester}`, MAX_GLOBAL_REQUESTS_PER_WINDOW)) {
+        return {
+          ok: false,
+          status: 429,
+          message: "Too many indexing attempts from this client. Please wait and retry.",
+        } as const
+      }
 
-    if (await isRateLimited(`global:${requester}`, MAX_GLOBAL_REQUESTS_PER_WINDOW)) {
-      return {
-        ok: false,
-        status: 429,
-        message: "Too many indexing attempts from this client. Please wait and retry.",
-      } as const
-    }
+      if (await isRateLimited(`repo:${requester}:${repo}`, MAX_REQUESTS_PER_WINDOW)) {
+        return {
+          ok: false,
+          status: 429,
+          message: "Too many indexing attempts. Please wait and retry.",
+        } as const
+      }
 
-    if (await isRateLimited(`repo:${requester}:${repo}`, MAX_REQUESTS_PER_WINDOW)) {
-      return {
-        ok: false,
-        status: 429,
-        message: "Too many indexing attempts. Please wait and retry.",
-      } as const
-    }
-
-    if (await isRateLimited(`repo-global:${repo}`, MAX_REPO_GLOBAL_REQUESTS_PER_WINDOW)) {
-      return {
-        ok: false,
-        status: 429,
-        message: "This repository is being indexed too frequently. Please retry in a minute.",
-      } as const
+      if (await isRateLimited(`repo-global:${repo}`, MAX_REPO_GLOBAL_REQUESTS_PER_WINDOW)) {
+        return {
+          ok: false,
+          status: 429,
+          message: "This repository is being indexed too frequently. Please retry in a minute.",
+        } as const
+      }
     }
 
     const existingLock = await ctx.db
@@ -621,7 +625,8 @@ export const getRepositorySnapshotMeta = internalQueryGeneric({
 
     const snapshot = await ctx.db
       .query("snapshots")
-      .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
+      .withIndex("by_repo_and_indexed", (q) => q.eq("repoId", repo._id))
+      .order("desc")
       .first()
 
     return {
@@ -695,7 +700,16 @@ export const replaceRepositorySnapshot = internalMutationGeneric({
       .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
       .collect()
 
-    const existingNormalizedEntries = existingEntries.map((entry) => normalizeStoredEntry(entry))
+    const uniqueExistingByHandle = new Map<string, (typeof existingEntries)[number]>()
+    for (const existingEntry of existingEntries) {
+      if (!uniqueExistingByHandle.has(existingEntry.handle)) {
+        uniqueExistingByHandle.set(existingEntry.handle, existingEntry)
+      }
+    }
+
+    const existingNormalizedEntries = Array.from(uniqueExistingByHandle.values()).map((entry) =>
+      normalizeStoredEntry(entry)
+    )
     const changes = computeAuditChanges(existingNormalizedEntries, normalizedEntries)
     const leaderboardDeltas = computeLeaderboardDeltas(changes)
     const previousBlock = await ctx.db
@@ -704,36 +718,80 @@ export const replaceRepositorySnapshot = internalMutationGeneric({
       .order("desc")
       .first()
 
-    for (const entry of existingEntries) {
-      await ctx.db.delete(entry._id)
-    }
-
-    const existingSnapshots = await ctx.db
+    const latestSnapshot = await ctx.db
       .query("snapshots")
-      .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
-      .collect()
+      .withIndex("by_repo_and_indexed", (q) => q.eq("repoId", repo._id))
+      .order("desc")
+      .first()
 
-    for (const snapshot of existingSnapshots) {
-      await ctx.db.delete(snapshot._id)
+    let snapshotId = latestSnapshot?._id
+    if (snapshotId) {
+      await ctx.db.patch(snapshotId, {
+        commitSha: args.commitSha,
+        filePath: args.filePath,
+        indexedAt: now,
+      })
+    } else {
+      snapshotId = await ctx.db.insert("snapshots", {
+        repoId: repo._id,
+        commitSha: args.commitSha,
+        filePath: args.filePath,
+        indexedAt: now,
+      })
     }
 
-    const snapshotId = await ctx.db.insert("snapshots", {
-      repoId: repo._id,
-      commitSha: args.commitSha,
-      filePath: args.filePath,
-      indexedAt: now,
-    })
+    const reconciliationPlan = planEntryReconciliation(
+      existingEntries.map((entry) => ({
+        id: entry._id,
+        snapshotId: String(entry.snapshotId),
+        repoSlug: entry.repoSlug,
+        platform: entry.platform,
+        username: entry.username,
+        handle: entry.handle,
+        type: entry.type,
+        details: entry.details,
+      })),
+      normalizedEntries.map((entry) => ({
+        platform: entry.platform,
+        username: entry.username,
+        handle: entry.handle,
+        type: entry.type,
+        details: entry.details,
+      })),
+      repo.slug,
+      String(snapshotId)
+    )
 
-    for (const entry of normalizedEntries) {
+    for (const duplicateId of reconciliationPlan.duplicateDeleteIds) {
+      await ctx.db.delete(duplicateId)
+    }
+
+    for (const entryId of reconciliationPlan.deleteIds) {
+      await ctx.db.delete(entryId)
+    }
+
+    for (const patch of reconciliationPlan.patches) {
+      await ctx.db.patch(patch.id, {
+        platform: patch.patch.platform,
+        username: patch.patch.username,
+        handle: patch.patch.handle,
+        type: patch.patch.type,
+        details: patch.patch.details,
+        snapshotId,
+        repoSlug: repo.slug,
+      })
+    }
+
+    for (const insertEntry of reconciliationPlan.inserts) {
       await ctx.db.insert("entries", {
         repoId: repo._id,
         repoSlug: repo.slug,
         snapshotId,
-        platform: entry.platform,
-        username: entry.username,
-        handle: `${entry.platform}:${entry.username}`,
-        type: entry.type,
-        details: entry.details,
+        platform: insertEntry.platform,
+        username: insertEntry.username,
+        handle: insertEntry.handle,
+        type: insertEntry.type,
+        details: insertEntry.details,
       })
     }
 
@@ -1116,6 +1174,7 @@ export const reindexTrackedRepos = internalActionGeneric({
     const slugs = await ctx.runQuery(internalApi.vouch.listTrackedRepoSlugs, {
       limit: args.limit ?? 25,
     })
+    const cronRequester = "cron:reindex-tracked-repositories"
 
     let indexed = 0
     let failed = 0
@@ -1131,9 +1190,32 @@ export const reindexTrackedRepos = internalActionGeneric({
     > = []
 
     for (const slug of slugs) {
+      const permit = await ctx.runMutation(internalApi.vouch.acquireIndexPermit, {
+        repo: slug,
+        requester: cronRequester,
+        skipRateLimit: true,
+      })
+      if (!permit.ok) {
+        failed += 1
+        results.push({
+          slug,
+          status: "error",
+          message: permit.message,
+        })
+        continue
+      }
+
       const result = await ctx.runAction(internalApi.vouch.indexGithubRepo, {
         repo: slug,
         allowAuthenticatedGithub: true,
+      }).finally(async () => {
+        try {
+          await ctx.runMutation(internalApi.vouch.releaseRepoIndexLock, {
+            repo: slug,
+          })
+        } catch {
+          // Best-effort lock cleanup; lock also has a TTL fallback.
+        }
       })
 
       if (result.status === "indexed") {
@@ -1205,7 +1287,8 @@ export const getRepository = queryGeneric({
 
     const snapshot = await ctx.db
       .query("snapshots")
-      .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
+      .withIndex("by_repo_and_indexed", (q) => q.eq("repoId", repo._id))
+      .order("desc")
       .first()
 
     let vouched = repo.vouchedCount
@@ -1254,6 +1337,30 @@ export const listRepositoryEntriesPaginated = queryGeneric({
       .paginate(args.paginationOpts)
 
     return result
+  },
+})
+
+export const listRepositoryEntriesPreview = queryGeneric({
+  args: {
+    slug: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const normalized = normalizeGithubSlug(args.slug)
+    const limit = Math.min(Math.max(args.limit ?? 50, 1), 200)
+    const repo = await ctx.db
+      .query("repositories")
+      .withIndex("by_slug", (q) => q.eq("slug", normalized.slug))
+      .unique()
+
+    if (!repo) {
+      return []
+    }
+
+    return await ctx.db
+      .query("entries")
+      .withIndex("by_repo", (q) => q.eq("repoId", repo._id))
+      .take(limit)
   },
 })
 
@@ -1425,6 +1532,61 @@ export const listUserEntriesPaginated = queryGeneric({
       ...result,
       page: rows,
     }
+  },
+})
+
+export const listUserEntriesPreview = queryGeneric({
+  args: {
+    handle: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const parsed = parseUserHandle(args.handle)
+    if (!parsed) {
+      return []
+    }
+
+    const limit = Math.min(Math.max(args.limit ?? 50, 1), 200)
+    const { username, platformFilter } = parsed
+    const entries = platformFilter
+      ? await ctx.db
+          .query("entries")
+          .withIndex("by_handle", (q) => q.eq("handle", `${platformFilter}:${username}`))
+          .take(limit)
+      : await ctx.db
+          .query("entries")
+          .withIndex("by_username", (q) => q.eq("username", username))
+          .take(limit)
+
+    const repoSlugById = new Map<string, string>()
+    for (const entry of entries) {
+      const repoId = String(entry.repoId)
+      if (entry.repoSlug) {
+        repoSlugById.set(repoId, entry.repoSlug)
+        continue
+      }
+
+      if (!repoSlugById.has(repoId)) {
+        const repo = await ctx.db.get(entry.repoId)
+        if (repo) {
+          repoSlugById.set(repoId, repo.slug)
+        }
+      }
+    }
+
+    return entries
+      .map((entry) => {
+        const repoSlug = repoSlugById.get(String(entry.repoId))
+        if (!repoSlug) {
+          return null
+        }
+
+        return {
+          entry,
+          repoSlug,
+        }
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null)
   },
 })
 

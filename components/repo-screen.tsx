@@ -19,6 +19,7 @@ import {
 import { useState, useTransition } from "react"
 
 import {
+  type EntryDoc,
   type RepositoryAuditOverview,
   type RepositoryOverview,
   api,
@@ -29,6 +30,9 @@ import { requestRepoIndex } from "@/lib/request-repo-index"
 
 type RepoScreenProps = {
   slug: string
+  initialRepository?: RepositoryOverview
+  initialAudit?: RepositoryAuditOverview
+  initialEntries?: EntryDoc[]
 }
 
 function formatDateTime(timestamp: number) {
@@ -43,7 +47,12 @@ function shortHash(input?: string | null) {
   return input.slice(0, 12)
 }
 
-export function RepoScreen({ slug }: RepoScreenProps) {
+export function RepoScreen({
+  slug,
+  initialRepository,
+  initialAudit,
+  initialEntries = [],
+}: RepoScreenProps) {
   if (!getValidConvexUrl()) {
     return (
       <main className="mx-auto flex min-h-screen w-full max-w-5xl items-center justify-center px-6 py-10">
@@ -63,14 +72,34 @@ export function RepoScreen({ slug }: RepoScreenProps) {
     )
   }
 
-  return <RepoScreenConfigured slug={slug} />
+  return (
+    <RepoScreenConfigured
+      slug={slug}
+      initialRepository={initialRepository}
+      initialAudit={initialAudit}
+      initialEntries={initialEntries}
+    />
+  )
 }
 
-function RepoScreenConfigured({ slug }: RepoScreenProps) {
+function RepoScreenConfigured({
+  slug,
+  initialRepository,
+  initialAudit,
+  initialEntries,
+}: {
+  slug: string
+  initialRepository: RepositoryOverview | undefined
+  initialAudit: RepositoryAuditOverview | undefined
+  initialEntries: EntryDoc[]
+}) {
   const [isPending, startTransition] = useTransition()
   const [message, setMessage] = useState<string | null>(null)
 
-  const data = useQuery(api.vouch.getRepository, { slug }) as RepositoryOverview | undefined
+  const liveData = useQuery(api.vouch.getRepository, { slug }) as
+    | RepositoryOverview
+    | undefined
+  const data = liveData === undefined ? initialRepository : liveData
   const {
     results: entries,
     isLoading: entriesLoading,
@@ -83,9 +112,11 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
     },
     { initialNumItems: 50 }
   )
-  const audit = useQuery(api.vouch.listRepositoryAudit, { slug, limit: 12, changeLimit: 20 }) as
+  const liveAudit = useQuery(api.vouch.listRepositoryAudit, { slug, limit: 12, changeLimit: 20 }) as
     | RepositoryAuditOverview
     | undefined
+  const audit = liveAudit === undefined ? initialAudit : liveAudit
+  const displayEntries = entries.length > 0 || !entriesLoading ? entries : initialEntries
 
   const handleReindex = () => {
     startTransition(async () => {
@@ -204,7 +235,7 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
           Trust entries
         </h2>
         <div className="grid gap-4 md:grid-cols-2">
-          {entries.map((entry, i) => (
+          {displayEntries.map((entry, i) => (
             <Link
               key={entry._id}
               href={`/u/${encodeURIComponent(entry.handle)}`}
@@ -241,12 +272,12 @@ function RepoScreenConfigured({ slug }: RepoScreenProps) {
             </Link>
           ))}
         </div>
-        {entries.length === 0 && entriesLoading && (
+        {displayEntries.length === 0 && entriesLoading && (
           <div className="card-paper rounded-xl border-dashed p-8 text-center">
             <p className="text-sm text-muted-foreground">Loading trust entries&hellip;</p>
           </div>
         )}
-        {entries.length === 0 && !entriesLoading && (
+        {displayEntries.length === 0 && !entriesLoading && (
           <div className="card-paper rounded-xl border-dashed p-8 text-center">
             <p className="text-sm text-muted-foreground">No trust entries found in this repository.</p>
           </div>

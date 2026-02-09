@@ -9,12 +9,16 @@ import {
   Trophy,
 } from "lucide-react"
 
-import { api } from "@/convex/api"
+import { type LeaderboardRow, api } from "@/convex/api"
 import { Button } from "@/components/ui/button"
 import { LeaderboardTable } from "@/components/leaderboard-table"
 import { getValidConvexUrl } from "@/lib/convex-url"
 
-export function LeaderboardScreen() {
+type LeaderboardScreenProps = {
+  initialRows?: LeaderboardRow[]
+}
+
+export function LeaderboardScreen({ initialRows = [] }: LeaderboardScreenProps) {
   if (!getValidConvexUrl()) {
     return (
       <main className="mx-auto flex min-h-screen w-full max-w-4xl items-center justify-center px-6 py-12">
@@ -31,16 +35,20 @@ export function LeaderboardScreen() {
     )
   }
 
-  return <LeaderboardScreenConfigured />
+  return <LeaderboardScreenConfigured initialRows={initialRows} />
 }
 
-function LeaderboardScreenConfigured() {
+function LeaderboardScreenConfigured({ initialRows }: { initialRows: LeaderboardRow[] }) {
   const {
-    results: leaderboard,
+    results: liveLeaderboard,
     isLoading,
     loadMore,
     status,
   } = usePaginatedQuery(api.vouch.listTopHandlesPaginated, {}, { initialNumItems: 100 })
+  const leaderboard =
+    liveLeaderboard.length > 0 || !isLoading
+      ? (liveLeaderboard as LeaderboardRow[])
+      : initialRows
   const isInitialLoading = isLoading && leaderboard.length === 0
   const canLoadMore = status === "CanLoadMore"
   const isLoadingMore = status === "LoadingMore"

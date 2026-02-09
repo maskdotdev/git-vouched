@@ -4,15 +4,21 @@ import Link from "next/link"
 import { usePaginatedQuery, useQuery } from "convex/react"
 import { ArrowLeft, ArrowRight, Fingerprint, ShieldCheck, ShieldOff } from "lucide-react"
 
-import { api } from "@/convex/api"
+import { type UserEntryRow, type UserOverview, api } from "@/convex/api"
 import { Button } from "@/components/ui/button"
 import { getValidConvexUrl } from "@/lib/convex-url"
 
 type UserScreenProps = {
   handle: string
+  initialOverview?: UserOverview
+  initialEntries?: UserEntryRow[]
 }
 
-export function UserScreen({ handle }: UserScreenProps) {
+export function UserScreen({
+  handle,
+  initialOverview,
+  initialEntries = [],
+}: UserScreenProps) {
   if (!getValidConvexUrl()) {
     return (
       <main className="mx-auto flex min-h-screen w-full max-w-5xl items-center justify-center px-6 py-10">
@@ -32,13 +38,28 @@ export function UserScreen({ handle }: UserScreenProps) {
     )
   }
 
-  return <UserScreenConfigured handle={handle} />
+  return (
+    <UserScreenConfigured
+      handle={handle}
+      initialOverview={initialOverview}
+      initialEntries={initialEntries}
+    />
+  )
 }
 
-function UserScreenConfigured({ handle }: UserScreenProps) {
-  const data = useQuery(api.vouch.getUserOverview, { handle })
+function UserScreenConfigured({
+  handle,
+  initialOverview,
+  initialEntries,
+}: {
+  handle: string
+  initialOverview: UserOverview | undefined
+  initialEntries: UserEntryRow[]
+}) {
+  const liveData = useQuery(api.vouch.getUserOverview, { handle })
+  const data = liveData === undefined ? initialOverview : liveData
   const {
-    results: rows,
+    results: liveRows,
     isLoading: rowsLoading,
     loadMore,
     status: rowStatus,
@@ -49,6 +70,7 @@ function UserScreenConfigured({ handle }: UserScreenProps) {
     },
     { initialNumItems: 50 }
   )
+  const rows = liveRows.length > 0 || !rowsLoading ? (liveRows as UserEntryRow[]) : initialEntries
 
   if (data === undefined) {
     return (
